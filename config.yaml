@@ -1,0 +1,12 @@
+llm:
+  model_id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+  device_map: "auto"
+  trust_remote_code: false
+  attn_implementation: "sdpa"
+  torch_dtype: "float16"
+  kv_cache: true
+
+  load_in_4bit: true
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_use_double_quant: true
+  bnb_4bit_compute_dtype: "float16"
