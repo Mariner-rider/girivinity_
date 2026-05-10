@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.core.query_router import QueryRouter
+from app.core.llm_synthesiser import LLMSynthesiser
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -41,13 +42,14 @@ async def chat_message(req: ChatRequest):
     urls = result.get("urls", [])
     confidence = float(result.get("confidence", 0.0))
 
-    if context:
-        answer = _format_answer(req.query, context, urls)
-    else:
-        answer = (
-            "I could not find verified information on this topic right now. "
-            "The system will search and learn more about it in the background."
-        )
+    answer = LLMSynthesiser().synthesise(
+        query=req.query,
+        context=context,
+        urls=urls,
+        stream=False,
+    )
+    if not isinstance(answer, str):
+        answer = "".join(answer)
 
     try:
         from app.core.analytics_engine import AnalyticsEngine
@@ -85,21 +87,17 @@ async def chat_message_stream(req: ChatRequest):
     urls = result.get("urls", [])
 
     def generate():
-        answer = _format_answer(req.query, context, urls) if context else (
-            "I could not find verified information on this topic right now. "
-            "The system will search and learn more about it in the background."
+        result = LLMSynthesiser().synthesise(
+            query=req.query,
+            context=context,
+            urls=urls,
+            stream=True,
         )
-        for word in answer.split(" "):
-            yield word + " "
+        if isinstance(result, str):
+            for word in result.split(" "):
+                yield word + " "
+        else:
+            yield from result
 
     return StreamingResponse(generate(), media_type="text/plain")
 
-
-def _format_answer(query: str, context: str, urls: list[str]) -> str:
-    """Structure the retrieved context into a clean answer."""
-    lines = ["Here is what I found:\n", context]
-    if urls:
-        lines.append("\nSources:")
-        for i, url in enumerate(urls[:3], 1):
-            lines.append(f"  [{i}] {url}")
-    return "\n".join(lines)
