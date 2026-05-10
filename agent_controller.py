@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from app.reasoning_planner import ReasoningPlanner
 from app.security.policy import SecurityGuard, secure_operation
 
 
@@ -126,6 +127,7 @@ class AgentController:
     def __init__(self, security_guard: SecurityGuard | None = None) -> None:
         self.security_guard = security_guard or SecurityGuard()
         self.memory = SharedMemory()
+        self.reasoning_planner = ReasoningPlanner()
         self.research_agent = ResearchAgent()
         self.reasoning_agent = ReasoningAgent()
         self.critic_agent = CriticAgent()
@@ -151,11 +153,13 @@ class AgentController:
     @secure_operation("agents.execute")
     def execute(self, task: str) -> dict:
         self.security_guard.validate_prompt(task)
+        plan = self.reasoning_planner.build_plan(task)
         agents = self.route_task(task)
         hidden_scratchpad: list[str] = []
         mailbox: list[AgentMessage] = []
         results: list[AgentResult] = []
 
+        hidden_scratchpad.append(f"internal_reasoning_plan={plan.to_json()}")
         for agent in agents:
             results.append(agent.run(task, self.memory, mailbox, hidden_scratchpad))
 
