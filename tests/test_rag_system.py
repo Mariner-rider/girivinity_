@@ -17,6 +17,12 @@ class FakeSearcher:
         ][:top_k]
 
 
+class EmptySearcher:
+    def search(self, query_vector: np.ndarray, top_k: int) -> list[RetrievedChunk]:
+        _ = (query_vector, top_k)
+        return []
+
+
 class FakeGenerator:
     def __init__(self):
         self.last_prompt = ""
@@ -27,13 +33,14 @@ class FakeGenerator:
         return "- RAG combines retrieval with generation [source:doc-1]."
 
 
-def test_rag_generate_includes_sources_and_confidence():
+def test_rag_generate_includes_sources_citations_and_confidence():
     generator = FakeGenerator()
     rag = RAGSystem(embedder=FakeEmbedder(), searcher=FakeSearcher(), generator=generator)
     response = rag.generate("What is RAG?", top_k=2)
 
     assert "source:doc-1" in response.answer
     assert len(response.sources) == 2
+    assert response.citations == ["source:doc-1", "source:doc-2"]
     assert response.confidence == 0.865
     assert "[source:doc-1]" in response.context
 
@@ -43,3 +50,15 @@ def test_rag_prompt_includes_user_level():
     rag = RAGSystem(embedder=FakeEmbedder(), searcher=FakeSearcher(), generator=generator)
     rag.generate("Explain faiss quantization and retrieval", top_k=1)
     assert "User level:" in generator.last_prompt
+
+
+def test_rag_returns_insufficient_information_when_no_data():
+    generator = FakeGenerator()
+    rag = RAGSystem(embedder=FakeEmbedder(), searcher=EmptySearcher(), generator=generator)
+    response = rag.generate("Unknown query", top_k=3)
+
+    assert response.answer == "insufficient information"
+    assert response.sources == []
+    assert response.citations == []
+    assert response.confidence == 0.0
+    assert response.context == ""
