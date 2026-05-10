@@ -11,6 +11,7 @@ from app.core.system_config import REQUIRED_MODULES, get_system_config
 from app.llm.loader import QuantizedLLMLoader
 from app.monitoring.logging import configure_logging
 from app.monitoring.metrics import REQUEST_COUNTER
+from app.api.routes.admin import router as admin_router
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Girivinity", lifespan=lifespan)
+app.include_router(admin_router)
 
 
 @app.middleware("http")
