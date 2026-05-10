@@ -61,6 +61,13 @@ def test_kb_hit(monkeypatch):
     assert result["source"] == "knowledge_base"
     assert result["trigger_web"] is False
 
+    class FakeWebIntelligence:
+        def search(self, query: str):
+            return {
+                "answer_chunks": [{"text": "test", "score": 0.6}],
+                "raw_chunks": [],
+                "sources": [],
+            }
 
 def test_kb_miss(monkeypatch):
     _mock_kb(

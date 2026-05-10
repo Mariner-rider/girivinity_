@@ -67,7 +67,7 @@ class ResearchAgent:
             findings = f"Research error for '{task}': {exc}"
         memory.add_fact(findings)
         mailbox.append(AgentMessage(self.name, "reasoning_agent", findings))
-        return AgentResult(self.name, findings, confidence=0.72, citations=["internal:memory"])
+        return AgentResult(self.name, findings, confidence=result["confidence"], citations=result["urls"])
 
 
 class ReasoningAgent:
