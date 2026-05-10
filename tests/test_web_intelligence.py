@@ -7,9 +7,9 @@ import types
 import numpy as np
 import pytest
 
-from core.query_router import QueryRouter
-from core import web_intelligence
-from core.web_intelligence import WebIntelligence
+from app.core import query_router, web_intelligence
+from app.core.query_router import QueryRouter
+from app.core.web_intelligence import WebIntelligence
 
 
 class FakeSentenceTransformer:
@@ -79,6 +79,7 @@ class FakeChromaClient:
 
 def test_web_intelligence_returns_scored_chunks_and_upserts_training(monkeypatch):
     QueryRouter.reset_model_cache()
+    monkeypatch.setattr(query_router, "SentenceTransformer", FakeSentenceTransformer)
     collection = FakeCollection()
 
     def fake_http_get(url: str, **kwargs):
@@ -107,11 +108,15 @@ def test_web_intelligence_returns_scored_chunks_and_upserts_training(monkeypatch
         "chromadb",
         types.SimpleNamespace(PersistentClient=lambda path: FakeChromaClient(path, collection)),
     )
-    monkeypatch.setattr(web_intelligence, "DDGS", None)
-    monkeypatch.setattr(web_intelligence, "httpx", None)
-    monkeypatch.setattr(web_intelligence, "trafilatura", None)
-    monkeypatch.setattr(web_intelligence, "chromadb", None)
-    monkeypatch.setattr(web_intelligence, "util", None)
+    monkeypatch.setattr(web_intelligence, "DDGS", FakeDDGS)
+    monkeypatch.setattr(web_intelligence, "httpx", types.SimpleNamespace(get=fake_http_get))
+    monkeypatch.setattr(web_intelligence, "trafilatura", types.SimpleNamespace(extract=fake_extract))
+    monkeypatch.setattr(
+        web_intelligence,
+        "chromadb",
+        types.SimpleNamespace(PersistentClient=lambda path: FakeChromaClient(path, collection)),
+    )
+    monkeypatch.setattr(web_intelligence, "util", FakeUtil)
 
     result = WebIntelligence().search("test query")
 
@@ -119,6 +124,13 @@ def test_web_intelligence_returns_scored_chunks_and_upserts_training(monkeypatch
     assert len(result["answer_chunks"]) == 3
     assert len(result["raw_chunks"]) == 3
     assert result["sources"] == [{"url": "https://example.com/one", "title": "One", "score": 1.0}]
+    for _ in range(20):
+        if collection.upserted is not None:
+            break
+        import time
+
+        time.sleep(0.01)
+
     assert collection.upserted is not None
     assert collection.upserted["documents"] == [chunk["text"] for chunk in result["raw_chunks"]]
     assert collection.upserted["metadatas"][0]["url"] == "https://example.com/one"
@@ -129,6 +141,7 @@ def test_web_intelligence_returns_scored_chunks_and_upserts_training(monkeypatch
 
 def test_web_intelligence_no_results_when_all_urls_fail(monkeypatch):
     QueryRouter.reset_model_cache()
+    monkeypatch.setattr(query_router, "SentenceTransformer", FakeSentenceTransformer)
 
     class AllFailDDGS(FakeDDGS):
         def text(self, query: str, max_results: int):
@@ -141,9 +154,17 @@ def test_web_intelligence_no_results_when_all_urls_fail(monkeypatch):
         "chromadb",
         types.SimpleNamespace(PersistentClient=lambda path: FakeChromaClient(path, FakeCollection())),
     )
-    monkeypatch.setattr(web_intelligence, "DDGS", None)
-    monkeypatch.setattr(web_intelligence, "httpx", None)
-    monkeypatch.setattr(web_intelligence, "chromadb", None)
+    monkeypatch.setattr(web_intelligence, "DDGS", AllFailDDGS)
+    monkeypatch.setattr(
+        web_intelligence,
+        "httpx",
+        types.SimpleNamespace(get=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("fail"))),
+    )
+    monkeypatch.setattr(
+        web_intelligence,
+        "chromadb",
+        types.SimpleNamespace(PersistentClient=lambda path: FakeChromaClient(path, FakeCollection())),
+    )
 
     result = WebIntelligence().search("test query")
 

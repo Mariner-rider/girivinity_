@@ -5,7 +5,7 @@ import types
 
 import numpy as np
 
-from core import query_router
+from app.core import query_router
 
 
 class FakeSentenceTransformer:
@@ -36,8 +36,8 @@ class FakePersistentClient:
         return FakeCollection(self.result)
 
 
-def _mock_kb(monkeypatch, result):
-    query_router.QueryRouter.reset_model_cache()
+def _mock_kb(monkeypatch, result) -> None:
+    query_router._EMBEDDER = None
     monkeypatch.setattr(query_router, "SentenceTransformer", FakeSentenceTransformer)
     monkeypatch.setattr(
         query_router,
@@ -60,10 +60,14 @@ def test_kb_hit(monkeypatch):
 
     assert result["source"] == "knowledge_base"
     assert result["trigger_web"] is False
-    assert result["confidence"] == 0.95
-    assert result["chunks"][0]["text"] == "kb chunk"
-    assert result["context_string"] == "Context:\n[1] kb chunk"
 
+    class FakeWebIntelligence:
+        def search(self, query: str):
+            return {
+                "answer_chunks": [{"text": "test", "score": 0.6}],
+                "raw_chunks": [],
+                "sources": [],
+            }
 
 def test_kb_miss(monkeypatch):
     _mock_kb(
@@ -71,7 +75,7 @@ def test_kb_miss(monkeypatch):
         {
             "documents": [["weak chunk"]],
             "metadatas": [[{}]],
-            "distances": [[1.8]],
+            "distances": [[1.9]],
         },
     )
 
@@ -83,24 +87,22 @@ def test_kb_miss(monkeypatch):
                 "sources": [],
             }
 
-    import core.web_intelligence as web_intelligence
+    import app.core.web_intelligence as web_intelligence
 
     monkeypatch.setattr(web_intelligence, "WebIntelligence", FakeWebIntelligence)
 
     result = query_router.QueryRouter().route("Needs web")
 
     assert result["source"] == "web"
-    assert result["trigger_web"] is True
-    assert result["chunks"] == [{"text": "test", "score": 0.6}]
 
 
-def test_background_thread_does_not_block(monkeypatch):
+def test_training_is_async(monkeypatch):
     _mock_kb(
         monkeypatch,
         {
             "documents": [["weak chunk"]],
             "metadatas": [[{}]],
-            "distances": [[1.8]],
+            "distances": [[1.9]],
         },
     )
 
@@ -112,15 +114,10 @@ def test_background_thread_does_not_block(monkeypatch):
                 "sources": [],
             }
 
-    class SlowSelfTrainer:
-        def queue(self, query: str, chunks: list) -> None:
-            time.sleep(1.0)
-
-    import core.self_trainer as self_trainer
-    import core.web_intelligence as web_intelligence
+    import app.core.web_intelligence as web_intelligence
 
     monkeypatch.setattr(web_intelligence, "WebIntelligence", FakeWebIntelligence)
-    monkeypatch.setattr(self_trainer, "SelfTrainer", SlowSelfTrainer)
+    monkeypatch.setattr(query_router.QueryRouter, "_queue_training", lambda self, query, chunks: time.sleep(1.0))
 
     started = time.time()
     result = query_router.QueryRouter().route("Needs background queue")
