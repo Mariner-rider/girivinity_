@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import sys
 import time
 import types
+
+import numpy as np
 
 from core import query_router
 
@@ -11,142 +12,119 @@ class FakeSentenceTransformer:
     def __init__(self, model_name: str) -> None:
         assert model_name == "all-MiniLM-L6-v2"
 
-    def encode(self, text: str, convert_to_numpy: bool = True, normalize_embeddings: bool = True):
-        assert convert_to_numpy is True
-        assert normalize_embeddings is True
-        return [0.1, 0.2, 0.3]
+    def encode(self, query: str):
+        return np.asarray([0.1, 0.2, 0.3], dtype=np.float32)
 
 
 class FakeCollection:
     def __init__(self, result):
-        self._result = result
+        self.result = result
 
     def query(self, **kwargs):
         assert kwargs["n_results"] == 5
-        return self._result
+        assert kwargs["include"] == ["documents", "metadatas", "distances"]
+        return self.result
 
 
-class FakeClient:
-    def __init__(self, result):
-        self._result = result
+class FakePersistentClient:
+    def __init__(self, *, path: str, result) -> None:
+        assert path == "data/chroma"
+        self.result = result
 
     def get_or_create_collection(self, name: str):
         assert name == "girivinity_knowledge"
-        return FakeCollection(self._result)
+        return FakeCollection(self.result)
 
 
-def _config(tmp_path):
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text('rag:\n  chroma_path: null\n')
-    return config_path
-
-
-def _mock_modules(monkeypatch, chroma_result):
+def _mock_kb(monkeypatch, result):
     query_router.QueryRouter.reset_model_cache()
-    monkeypatch.setitem(
-        sys.modules,
-        "sentence_transformers",
-        types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
-    )
-    monkeypatch.setitem(
-        sys.modules,
+    monkeypatch.setattr(query_router, "SentenceTransformer", FakeSentenceTransformer)
+    monkeypatch.setattr(
+        query_router,
         "chromadb",
-        types.SimpleNamespace(Client=lambda: FakeClient(chroma_result)),
+        types.SimpleNamespace(PersistentClient=lambda path: FakePersistentClient(path=path, result=result)),
     )
 
 
-def test_kb_hit(monkeypatch, tmp_path):
-    _mock_modules(
+def test_kb_hit(monkeypatch):
+    _mock_kb(
         monkeypatch,
         {
-            "documents": [["chunk-a", "chunk-b"]],
-            "metadatas": [[{"url": "https://kb.example/a"}, {"url": "https://kb.example/b"}]],
-            "distances": [[0.2, 0.25]],
+            "documents": [["kb chunk"]],
+            "metadatas": [[{"url": "https://kb.example/source"}]],
+            "distances": [[0.1]],
         },
     )
 
-    result = query_router.QueryRouter(config_path=_config(tmp_path)).route("What is AI?")
+    result = query_router.QueryRouter().route("What is Girivinity?")
 
-    assert result["source"] == "kb"
-    assert result["chunks"] == ["chunk-a", "chunk-b"]
+    assert result["source"] == "knowledge_base"
     assert result["trigger_web"] is False
-    assert result["confidence"] == 0.8
-    assert result["urls"] == ["https://kb.example/a", "https://kb.example/b"]
-    assert "Context:\n[1] chunk-a\n[2] chunk-b" in result["context_string"]
+    assert result["confidence"] == 0.95
+    assert result["chunks"][0]["text"] == "kb chunk"
+    assert result["context_string"] == "Context:\n[1] kb chunk"
 
 
-def test_kb_miss(monkeypatch, tmp_path):
-    _mock_modules(
+def test_kb_miss(monkeypatch):
+    _mock_kb(
         monkeypatch,
         {
-            "documents": [["weak-kb-chunk"]],
-            "metadatas": [[{"url": "https://kb.example/weak"}]],
-            "distances": [[0.7]],
+            "documents": [["weak chunk"]],
+            "metadatas": [[{}]],
+            "distances": [[1.8]],
         },
     )
 
     class FakeWebIntelligence:
-        def __init__(self, query: str) -> None:
-            self.query = query
-
-        def search(self):
+        def search(self, query: str):
             return {
-                "answer_chunks": ["web-chunk-1", "web-chunk-2"],
-                "raw_chunks": [{"text": "raw-web-chunk", "url": "https://web.example/a", "score": 0.91}],
-                "sources": [{"url": "https://web.example/a", "score": 0.91}],
+                "answer_chunks": [{"text": "test", "score": 0.6}],
+                "raw_chunks": [],
+                "sources": [],
             }
 
-    class FakeSelfTrainer:
-        def queue(self, query: str, chunks: list):
-            return None
-
     import core.web_intelligence as web_intelligence
-    import core.self_trainer as self_trainer
 
     monkeypatch.setattr(web_intelligence, "WebIntelligence", FakeWebIntelligence)
-    monkeypatch.setattr(self_trainer, "SelfTrainer", FakeSelfTrainer)
 
-    result = query_router.QueryRouter(config_path=_config(tmp_path)).route("Latest AI news")
+    result = query_router.QueryRouter().route("Needs web")
 
     assert result["source"] == "web"
-    assert result["chunks"] == ["web-chunk-1", "web-chunk-2"]
     assert result["trigger_web"] is True
-    assert result["raw_for_training"] == [
-        {"text": "raw-web-chunk", "url": "https://web.example/a", "score": 0.91}
-    ]
-    assert result["urls"] == ["https://web.example/a"]
+    assert result["chunks"] == [{"text": "test", "score": 0.6}]
 
 
-def test_thread_does_not_block(monkeypatch, tmp_path):
-    _mock_modules(
+def test_background_thread_does_not_block(monkeypatch):
+    _mock_kb(
         monkeypatch,
-        {"documents": [["weak"]], "metadatas": [[{}]], "distances": [[0.7]]},
+        {
+            "documents": [["weak chunk"]],
+            "metadatas": [[{}]],
+            "distances": [[1.8]],
+        },
     )
 
     class FakeWebIntelligence:
-        def __init__(self, query: str) -> None:
-            self.query = query
-
-        def search(self):
+        def search(self, query: str):
             return {
-                "answer_chunks": ["web-chunk"],
-                "raw_chunks": ["raw-web-chunk"],
-                "sources": [{"url": "https://web.example/a", "score": 0.8}],
+                "answer_chunks": [{"text": "test", "score": 0.6}],
+                "raw_chunks": [{"text": "raw", "score": 0.6}],
+                "sources": [],
             }
 
     class SlowSelfTrainer:
-        def queue(self, query: str, chunks: list):
-            time.sleep(0.25)
+        def queue(self, query: str, chunks: list) -> None:
+            time.sleep(1.0)
 
-    import core.web_intelligence as web_intelligence
     import core.self_trainer as self_trainer
+    import core.web_intelligence as web_intelligence
 
     monkeypatch.setattr(web_intelligence, "WebIntelligence", FakeWebIntelligence)
     monkeypatch.setattr(self_trainer, "SelfTrainer", SlowSelfTrainer)
 
-    started = time.perf_counter()
-    result = query_router.QueryRouter(config_path=_config(tmp_path)).route("Needs web")
-    elapsed = time.perf_counter() - started
+    started = time.time()
+    result = query_router.QueryRouter().route("Needs background queue")
+    elapsed = time.time() - started
 
     assert result["source"] == "web"
-    assert elapsed < 0.1
+    assert elapsed < 0.5

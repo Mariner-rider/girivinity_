@@ -58,10 +58,13 @@ class ResearchAgent:
         hidden_scratchpad: list[str],
     ) -> AgentResult:
         hidden_scratchpad.append(f"Researching task: {task}")
-        from core.query_router import QueryRouter
+        try:
+            from core.query_router import QueryRouter
 
-        result = QueryRouter().route(task)
-        findings = result["context_string"]
+            result = QueryRouter().route(task)
+            findings = result["context_string"] if result["context_string"] else f"No data found for: {task}"
+        except Exception as e:
+            findings = f"Research error for '{task}': {e}"
         memory.add_fact(findings)
         mailbox.append(AgentMessage(self.name, "reasoning_agent", findings))
         return AgentResult(self.name, findings, confidence=result["confidence"], citations=result["urls"])

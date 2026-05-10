@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.security.policy import SecurityGuard, SecurityPolicyError, secure_operation
+from app.security.policy import SecurityGuard, secure_operation
 
 
 @dataclass(slots=True)

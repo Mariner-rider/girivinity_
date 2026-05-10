@@ -122,6 +122,17 @@ modules:
     require_validation_dataset: true
     require_benchmark_improvement: true
     min_benchmark_delta: 0.0
+  self_training:
+    interval_seconds: 1800
+    chunk_threshold: 50
+    base_model_path: "models/base"
+    adapters_dir: "models/adapters"
+    training_queue_dir: "data/training_queue"
+    event_log_path: "logs/self_training.jsonl"
+    alerts_log_path: "logs/alerts.jsonl"
+    epochs: 3
+    learning_rate: 0.0002
+    loss_abort_threshold: 2.0
 
 self_training:
   interval_seconds: 1800

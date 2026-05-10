@@ -21,6 +21,7 @@ class SelfTrainerConfig:
     queue_db: Path = Path("data/training_queue.sqlite3")
     training_queue_dir: Path = Path("data/training_queue")
     event_log_path: Path = Path("logs/self_training.jsonl")
+    alerts_log_path: Path = Path("logs/alerts.jsonl")
     check_interval_minutes: float = 30.0
     min_batch_size: int = 50
     epochs: int = 3
@@ -31,6 +32,7 @@ class SelfTrainerConfig:
     adapters_dir: Path = Path("models/adapters")
     latest_adapter_path: Path = Path("models/adapters/latest")
     pid_path: Path = Path(".self_trainer.pid")
+    loss_abort_threshold: float = 2.0
 
     @classmethod
     def from_yaml(cls, config_path: str | Path = "config.yaml") -> SelfTrainerConfig:
@@ -38,7 +40,8 @@ class SelfTrainerConfig:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
         raw = raw or {}
         training = raw.get("training") or {}
-        self_training = raw.get("self_training") or {}
+        module_training = (raw.get("modules") or {}).get("self_training") or {}
+        self_training = {**(raw.get("self_training") or {}), **module_training}
         model = raw.get("model") or {}
         return cls(
             queue_db=Path(training.get("queue_db", self_training.get("queue_db", "data/training_queue.sqlite3"))),
@@ -47,6 +50,9 @@ class SelfTrainerConfig:
             ),
             event_log_path=Path(
                 training.get("event_log_path", self_training.get("event_log_path", "logs/self_training.jsonl"))
+            ),
+            alerts_log_path=Path(
+                training.get("alerts_log_path", self_training.get("alerts_log_path", "logs/alerts.jsonl"))
             ),
             check_interval_minutes=float(
                 training.get(
@@ -65,6 +71,9 @@ class SelfTrainerConfig:
                 training.get("latest_adapter_path", self_training.get("latest_adapter_path", "models/adapters/latest"))
             ),
             pid_path=Path(training.get("pid_path", self_training.get("pid_path", ".self_trainer.pid"))),
+            loss_abort_threshold=float(
+                training.get("loss_abort_threshold", self_training.get("loss_abort_threshold", 2.0))
+            ),
         )
 
 
@@ -122,6 +131,7 @@ class SelfTrainer:
     @classmethod
     def start(cls, *, config_path: str | Path = "config.yaml") -> mp.Process:
         """Start the self-trainer daemon in a separate process and write its PID."""
+        mp.set_start_method("spawn", force=True)
         process = mp.Process(
             target=_run_daemon_entrypoint,
             kwargs={"config_path": str(config_path)},
@@ -230,7 +240,11 @@ class SelfTrainer:
                 report_to=[],
             )
             trainer = Trainer(model=model, args=training_args, train_dataset=tokenized)
-            trainer.train()
+            train_result = trainer.train()
+            final_loss = getattr(train_result, "training_loss", None)
+            if final_loss is not None and final_loss > self.config.loss_abort_threshold:
+                self._log_alert({"timestamp": version, "alert": "loss_abort", "loss": final_loss})
+                return False
             model.save_pretrained(str(output_dir))
             tokenizer.save_pretrained(str(output_dir))
             self._promote_latest_adapter(output_dir)
@@ -300,6 +314,11 @@ class SelfTrainer:
         self.config.event_log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.config.event_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+    def _log_alert(self, alert: dict[str, Any]) -> None:
+        self.config.alerts_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.config.alerts_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(alert, sort_keys=True) + "\n")
 
     def _promote_latest_adapter(self, output_dir: Path) -> None:
         latest_path = self.config.latest_adapter_path

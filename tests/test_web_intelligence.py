@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from core.query_router import QueryRouter
+from core import web_intelligence
 from core.web_intelligence import WebIntelligence
 
 
@@ -15,12 +16,21 @@ class FakeSentenceTransformer:
     def __init__(self, model_name: str) -> None:
         assert model_name == "all-MiniLM-L6-v2"
 
-    def encode(self, texts, convert_to_numpy=True, normalize_embeddings=True):
-        assert convert_to_numpy is True
+    def encode(self, texts, convert_to_tensor=False, convert_to_numpy=False, normalize_embeddings=False):
+        if isinstance(texts, str):
+            return np.asarray([1.0, 0.0], dtype=np.float32)
         embeddings = []
         for index, _text in enumerate(texts):
             embeddings.append([1.0, 0.0] if index < 3 else [0.0, 1.0])
         return np.asarray(embeddings, dtype=np.float32)
+
+
+class FakeUtil:
+    @staticmethod
+    def cos_sim(q_vec, c_vecs):
+        q = np.asarray(q_vec, dtype=np.float32).reshape(1, -1)
+        c = np.asarray(c_vecs, dtype=np.float32)
+        return np.matmul(q, c.T)
 
 
 class FakeDDGS:
@@ -40,6 +50,8 @@ class FakeDDGS:
 
 
 class FakeResponse:
+    status_code = 200
+
     def __init__(self, text: str) -> None:
         self.text = text
 
@@ -56,7 +68,8 @@ class FakeCollection:
 
 
 class FakeChromaClient:
-    def __init__(self, collection: FakeCollection) -> None:
+    def __init__(self, path: str, collection: FakeCollection) -> None:
+        assert path == "data/chroma"
         self.collection = collection
 
     def get_or_create_collection(self, name: str):
@@ -84,7 +97,7 @@ def test_web_intelligence_returns_scored_chunks_and_upserts_training(monkeypatch
     monkeypatch.setitem(
         sys.modules,
         "sentence_transformers",
-        types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+        types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer, util=FakeUtil),
     )
     monkeypatch.setitem(sys.modules, "duckduckgo_search", types.SimpleNamespace(DDGS=FakeDDGS))
     monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(get=fake_http_get))
@@ -92,14 +105,19 @@ def test_web_intelligence_returns_scored_chunks_and_upserts_training(monkeypatch
     monkeypatch.setitem(
         sys.modules,
         "chromadb",
-        types.SimpleNamespace(Client=lambda: FakeChromaClient(collection)),
+        types.SimpleNamespace(PersistentClient=lambda path: FakeChromaClient(path, collection)),
     )
+    monkeypatch.setattr(web_intelligence, "DDGS", None)
+    monkeypatch.setattr(web_intelligence, "httpx", None)
+    monkeypatch.setattr(web_intelligence, "trafilatura", None)
+    monkeypatch.setattr(web_intelligence, "chromadb", None)
+    monkeypatch.setattr(web_intelligence, "util", None)
 
-    result = WebIntelligence("test query").search()
+    result = WebIntelligence().search("test query")
 
     assert result["query"] == "test query"
-    assert len(result["answer_chunks"]) == 2
-    assert len(result["raw_chunks"]) == 2
+    assert len(result["answer_chunks"]) == 3
+    assert len(result["raw_chunks"]) == 3
     assert result["sources"] == [{"url": "https://example.com/one", "title": "One", "score": 1.0}]
     assert collection.upserted is not None
     assert collection.upserted["documents"] == [chunk["text"] for chunk in result["raw_chunks"]]
@@ -118,13 +136,21 @@ def test_web_intelligence_no_results_when_all_urls_fail(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "duckduckgo_search", types.SimpleNamespace(DDGS=AllFailDDGS))
     monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(get=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("fail"))))
+    monkeypatch.setitem(
+        sys.modules,
+        "chromadb",
+        types.SimpleNamespace(PersistentClient=lambda path: FakeChromaClient(path, FakeCollection())),
+    )
+    monkeypatch.setattr(web_intelligence, "DDGS", None)
+    monkeypatch.setattr(web_intelligence, "httpx", None)
+    monkeypatch.setattr(web_intelligence, "chromadb", None)
 
     result = WebIntelligence().search("test query")
 
     assert result["answer_chunks"] == []
     assert result["raw_chunks"] == []
     assert result["sources"] == []
-    assert result["error"] == "no_results"
+    assert result["error"] == "extraction_failed"
     assert result["query"] == "test query"
 
 
