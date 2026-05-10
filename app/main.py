@@ -12,6 +12,7 @@ from llm_loader import GirivinityLoader
 from app.monitoring.logging import configure_logging
 from app.monitoring.metrics import REQUEST_COUNTER
 from app.core.self_trainer import SelfTrainer
+from app.core.successor_engine import SuccessorEngine
 from app.api.routes.admin import router as admin_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.health import router as health_router
@@ -80,3 +81,8 @@ async def start_self_trainer():
 
     multiprocessing.set_start_method("spawn", force=True)
     SelfTrainer.start()
+
+
+@app.on_event("startup")
+async def start_successor_engine():
+    SuccessorEngine.start()

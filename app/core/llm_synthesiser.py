@@ -4,6 +4,8 @@ import logging
 from pathlib import Path
 import yaml
 
+from app.core.truth_engine import TruthEngine
+
 logger = logging.getLogger(__name__)
 _ = (Path, yaml)
 
@@ -53,21 +55,50 @@ class LLMSynthesiser:
         context: str,
         urls: list[str],
         stream: bool = False,
+        web_sources: list[dict] | None = None,
     ) -> str | Iterator[str]:
         engine = get_engine()
 
         if engine is None:
-            return self._extraction_fallback(query, context, urls)
+            raw = self._extraction_fallback(query, context, urls)
+        else:
+            prompt = self._build_prompt(query, context)
+            try:
+                if stream:
+                    # Stream bypasses truth engine (real-time)
+                    return self._stream_with_sources(
+                        engine, prompt, urls
+                    )
+                raw = engine.generate(prompt, max_tokens=512, stream=False)
+                if not isinstance(raw, str):
+                    raw = "".join(raw)
+            except Exception as exc:
+                logger.error("LLM synthesis failed: %s", exc)
+                raw = self._extraction_fallback(query, context, urls)
 
-        prompt = self._build_prompt(query, context)
-
+        # Run truth verification on non-streaming responses
         try:
-            if stream:
-                return engine.generate(prompt, max_tokens=512, stream=True)
-            return engine.generate(prompt, max_tokens=512, stream=False)
+            verified = TruthEngine().verify(
+                response_text=raw,
+                web_sources=web_sources or [],
+                query=query,
+            )
+            return verified.text
         except Exception as exc:
-            logger.error("LLM synthesis failed: %s", exc)
-            return self._extraction_fallback(query, context, urls)
+            logger.warning("TruthEngine failed, returning raw: %s", exc)
+            return raw
+
+    def _stream_with_sources(
+        self,
+        engine,
+        prompt: str,
+        urls: list[str],
+    ) -> Iterator[str]:
+        yield from engine.generate(prompt, max_tokens=512, stream=True)
+        if urls:
+            yield "\n\nSources:"
+            for i, url in enumerate(urls[:3], 1):
+                yield f"\n  [{i}] {url}"
 
     def _build_prompt(self, query: str, context: str) -> str:
         return f"{SYSTEM_PROMPT}\n\n" f"Context:\n{context}\n\n" f"Question: {query}\n\n" f"Answer:"
