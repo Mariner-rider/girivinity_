@@ -2,6 +2,7 @@ import json
 
 from agent_controller import AgentController
 from app.reasoning_planner import ReasoningPlanner
+from app.core import query_router
 
 
 def test_reasoning_planner_outputs_structured_json_plan():
@@ -17,7 +18,16 @@ def test_reasoning_planner_outputs_structured_json_plan():
     assert isinstance(data["execution_plan"], list)
 
 
-def test_agent_controller_integrates_reasoning_planner_without_exposing_chain_of_thought():
+def test_agent_controller_integrates_reasoning_planner_without_exposing_chain_of_thought(monkeypatch):
+    class FakeQueryRouter:
+        def route(self, task: str):
+            return {
+                "context_string": f"Context:\n[1] researched {task}\n\nSources: https://example.org/research",
+                "confidence": 0.88,
+                "urls": ["https://example.org/research"],
+            }
+
+    monkeypatch.setattr(query_router, "QueryRouter", FakeQueryRouter)
     controller = AgentController()
     result = controller.execute("Create an API integration plan")
 

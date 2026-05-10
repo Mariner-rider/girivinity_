@@ -1,4 +1,5 @@
 from agent_controller import AgentController
+from app.core import query_router
 
 
 def test_task_routing_includes_all_agents():
@@ -8,7 +9,16 @@ def test_task_routing_includes_all_agents():
     assert names == ["research_agent", "reasoning_agent", "critic_agent", "memory_agent"]
 
 
-def test_execute_supports_shared_memory_and_inter_agent_messages():
+def test_execute_supports_shared_memory_and_inter_agent_messages(monkeypatch):
+    class FakeQueryRouter:
+        def route(self, task: str):
+            return {
+                "context_string": f"Context:\n[1] researched {task}\n\nSources: https://example.org/research",
+                "confidence": 0.88,
+                "urls": ["https://example.org/research"],
+            }
+
+    monkeypatch.setattr(query_router, "QueryRouter", FakeQueryRouter)
     controller = AgentController()
     result = controller.execute("build roadmap for retrieval system")
 

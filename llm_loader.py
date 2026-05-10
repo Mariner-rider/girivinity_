@@ -1,100 +1,93 @@
-"""Config-driven modular LLM loader with 4-bit quantization support."""
+"""Local Girivinity GGUF loader backed by llama-cpp-python only."""
 
 from __future__ import annotations
 
+import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
-import torch
 import yaml
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel, PreTrainedTokenizerBase
 
 
-@dataclass(slots=True)
-class ModelConfig:
-    model_id: str
-    device_map: str = "auto"
-    trust_remote_code: bool = False
-    attn_implementation: str = "sdpa"
-    torch_dtype: str = "float16"
-    kv_cache: bool = True
-
-    load_in_4bit: bool = True
-    bnb_4bit_quant_type: str = "nf4"
-    bnb_4bit_use_double_quant: bool = True
-    bnb_4bit_compute_dtype: str = "float16"
+_NOT_BUILT_MESSAGE = "Girivinity model not built yet. Run: python model/quantise.py first"
 
 
-@dataclass(slots=True)
-class LoadedModel:
-    tokenizer: PreTrainedTokenizerBase
-    model: PreTrainedModel
-    config: ModelConfig
+def _default_threads() -> int:
+    return max((os.cpu_count() or 2) - 1, 1)
 
 
-class LLMConfigError(ValueError):
-    """Raised when configuration content is invalid."""
+def _int_or_default(value: Any, default: int) -> int:
+    return default if value is None else int(value)
 
 
-def _to_dtype(dtype_name: str) -> torch.dtype:
-    mapping = {
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "float32": torch.float32,
-    }
-    try:
-        return mapping[dtype_name.lower()]
-    except KeyError as exc:
-        raise LLMConfigError(f"Unsupported dtype '{dtype_name}'.") from exc
+@dataclass(frozen=True, slots=True)
+class GirivinityLoaderConfig:
+    quantised_path: Path = Path("models/girivinity_quantised/girivinity-q4_k_m.gguf")
+    n_ctx: int = 4096
+    n_threads: int = _default_threads()
+    n_gpu_layers: int = 0
 
-
-def load_config(path: str | Path = "config.yaml") -> ModelConfig:
-    config_path = Path(path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
-    raw: dict[str, Any] = yaml.safe_load(config_path.read_text()) or {}
-    llm_cfg = raw.get("llm") or raw.get("modules", {}).get("llm")
-    if not isinstance(llm_cfg, dict):
-        raise LLMConfigError("Expected top-level 'llm' mapping in config.yaml")
-
-    return ModelConfig(**llm_cfg)
-
-
-class LLMFactory:
-    def __init__(self, config: ModelConfig) -> None:
-        self.config = config
-
-    def _quantization(self) -> BitsAndBytesConfig:
-        return BitsAndBytesConfig(
-            load_in_4bit=self.config.load_in_4bit,
-            bnb_4bit_quant_type=self.config.bnb_4bit_quant_type,
-            bnb_4bit_use_double_quant=self.config.bnb_4bit_use_double_quant,
-            bnb_4bit_compute_dtype=_to_dtype(self.config.bnb_4bit_compute_dtype),
+    @classmethod
+    def from_yaml(cls, path: str | Path = "config.yaml") -> "GirivinityLoaderConfig":
+        config_path = Path(path)
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+        raw = raw or {}
+        model = raw.get("model") or {}
+        quantisation = model.get("quantisation") or {}
+        return cls(
+            quantised_path=Path(
+                model.get(
+                    "quantised_path",
+                    quantisation.get(
+                        "output_model_path",
+                        "models/girivinity_quantised/girivinity-q4_k_m.gguf",
+                    ),
+                )
+            ),
+            n_ctx=_int_or_default(model.get("n_ctx"), 4096),
+            n_threads=_int_or_default(model.get("n_threads"), _default_threads()),
+            n_gpu_layers=_int_or_default(model.get("n_gpu_layers"), 0),
         )
 
-    def load(self) -> LoadedModel:
-        tokenizer = AutoTokenizer.from_pretrained(
-            self.config.model_id,
-            use_fast=True,
-            trust_remote_code=self.config.trust_remote_code,
-        )
 
-        model = AutoModelForCausalLM.from_pretrained(
-            self.config.model_id,
-            quantization_config=self._quantization(),
-            device_map=self.config.device_map,
-            attn_implementation=self.config.attn_implementation,
-            torch_dtype=_to_dtype(self.config.torch_dtype),
-            trust_remote_code=self.config.trust_remote_code,
-            low_cpu_mem_usage=True,
-        )
+class GirivinityLoader:
+    """Singleton loader for the local quantised Girivinity GGUF model."""
 
-        model.config.use_cache = self.config.kv_cache
-        return LoadedModel(tokenizer=tokenizer, model=model, config=self.config)
+    _model: ClassVar[Any | None] = None
+    _model_path: ClassVar[Path | None] = None
+    _lock: ClassVar[threading.Lock] = threading.Lock()
+
+    def __init__(self, config_path: str | Path = "config.yaml") -> None:
+        self.config_path = Path(config_path)
+        self.config = GirivinityLoaderConfig.from_yaml(config_path)
+
+    def get_model(self):
+        if not self.config.quantised_path.exists():
+            raise FileNotFoundError(_NOT_BUILT_MESSAGE)
+
+        with self._lock:
+            if self.__class__._model is None or self.__class__._model_path != self.config.quantised_path:
+                from llama_cpp import Llama
+
+                self.__class__._model = Llama(
+                    model_path=str(self.config.quantised_path),
+                    n_ctx=self.config.n_ctx,
+                    n_threads=self.config.n_threads,
+                    n_gpu_layers=self.config.n_gpu_layers,
+                )
+                self.__class__._model_path = self.config.quantised_path
+            return self.__class__._model
+
+    @classmethod
+    def reset_cache(cls) -> None:
+        """Clear singleton state for tests or explicit reloads."""
+        with cls._lock:
+            cls._model = None
+            cls._model_path = None
 
 
-def load_from_yaml(path: str | Path = "config.yaml") -> LoadedModel:
-    cfg = load_config(path)
-    return LLMFactory(cfg).load()
+# Compatibility helper for older callers that imported load_from_yaml().
+def load_from_yaml(path: str | Path = "config.yaml"):
+    return GirivinityLoader(path).get_model()

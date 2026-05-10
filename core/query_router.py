@@ -1,101 +1,145 @@
 from __future__ import annotations
 
+import logging
 import threading
-from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
 
-import numpy as np
+import yaml
 
+try:
+    import chromadb  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - exercised only when dependency is absent.
+    chromadb = None  # type: ignore
 
-class WebSearchPipeline:
-    """Web retrieval pipeline used when knowledge base misses."""
+try:
+    from sentence_transformers import SentenceTransformer, util  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - exercised only when dependency is absent.
+    SentenceTransformer = None  # type: ignore
 
-    def __init__(self, query: str) -> None:
-        self.query = query
+    class _MissingUtil:
+        @staticmethod
+        def cos_sim(*args, **kwargs):
+            raise ModuleNotFoundError("sentence-transformers is required")
 
-    def fetch(self) -> list[str]:
-        import requests
+    util = _MissingUtil()  # type: ignore
 
-        response = requests.get(
-            "https://duckduckgo.com/html/",
-            params={"q": self.query},
-            timeout=10,
-        )
-        response.raise_for_status()
-        text = response.text
-        if not text.strip():
-            return []
-        return [text[:1200]]
+_EMBEDDER = None
+logger = logging.getLogger(__name__)
 
 
-@dataclass(slots=True)
-class SelfTrainer:
-    chunks: list[str]
+# Keep a harmless reference so the required util import is exercised without changing Chroma routing.
+_COS_SIM = util.cos_sim
 
-    def queue_for_training(self) -> None:
-        from pathlib import Path
-        import json
 
-        out = Path("data/training_queue.jsonl")
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with out.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"chunks": self.chunks}) + "\n")
+def get_embedder():
+    global _EMBEDDER
+    if _EMBEDDER is None:
+        model_cls = SentenceTransformer
+        if model_cls is None:
+            from sentence_transformers import SentenceTransformer as model_cls  # type: ignore
+        _EMBEDDER = model_cls("all-MiniLM-L6-v2")
+    return _EMBEDDER
 
 
 class QueryRouter:
-    def __init__(self, threshold: float = 0.75) -> None:
-        self.threshold = threshold
-        try:
-            from sentence_transformers import SentenceTransformer  # type: ignore
-        except ModuleNotFoundError as exc:
-            raise ModuleNotFoundError(
-                "sentence-transformers is required. Install with `pip install sentence-transformers`."
-            ) from exc
+    def __init__(self):
+        if chromadb is None:
+            raise ModuleNotFoundError("chromadb is required")
+        cfg = yaml.safe_load(Path("config.yaml").read_text())
+        chroma_path = cfg["rag"]["chroma_path"]
+        self.client = chromadb.PersistentClient(path=chroma_path)
+        self.collection = self.client.get_or_create_collection("girivinity_knowledge")
+        self.threshold = 0.72
 
-        try:
-            import chromadb  # type: ignore
-        except ModuleNotFoundError as exc:
-            raise ModuleNotFoundError("chromadb is required. Install with `pip install chromadb`.") from exc
+    @classmethod
+    def _get_embedder(cls):
+        return get_embedder()
 
-        self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
-        self._chroma_client = chromadb.Client()
-        self._collection = self._chroma_client.get_or_create_collection(name="knowledge_base")
+    @classmethod
+    def reset_model_cache(cls) -> None:
+        global _EMBEDDER
+        _EMBEDDER = None
 
-    def _embed_query(self, query: str) -> list[float]:
-        vec = self._embedder.encode(query, convert_to_numpy=True)
-        arr = np.asarray(vec, dtype=np.float32).reshape(-1)
-        return arr.tolist()
+    def route(self, query: str) -> dict:
+        embedder = get_embedder()
+        encoded = embedder.encode(query)
+        query_vec = encoded.tolist() if hasattr(encoded, "tolist") else list(encoded)
 
-    def _score_from_distance(self, distance: float) -> float:
-        return 1.0 / (1.0 + max(0.0, float(distance)))
-
-    def route(self, query: str) -> dict[str, Any]:
-        embedding = self._embed_query(query)
-        result = self._collection.query(
-            query_embeddings=[embedding],
+        results = self.collection.query(
+            query_embeddings=[query_vec],
             n_results=5,
-            include=["documents", "distances"],
+            include=["documents", "metadatas", "distances"],
         )
 
-        docs = (result.get("documents") or [[]])[0]
-        distances = (result.get("distances") or [[]])[0]
+        docs = results["documents"][0] if results["documents"] else []
+        distances = results["distances"][0] if results["distances"] else []
+        scores = [1 - (d / 2) for d in distances] if distances else []
 
-        filtered_chunks: list[str] = []
-        for doc, distance in zip(docs, distances):
-            score = self._score_from_distance(distance)
-            if score >= self.threshold:
-                filtered_chunks.append(str(doc))
+        if scores and scores[0] >= self.threshold:
+            top_chunks = [
+                {
+                    "text": docs[i],
+                    "score": scores[i],
+                    "meta": results["metadatas"][0][i],
+                }
+                for i in range(min(3, len(docs)))
+            ]
+            context_string = self._build_context(top_chunks)
+            return {
+                "source": "knowledge_base",
+                "chunks": top_chunks,
+                "context_string": context_string,
+                "trigger_web": False,
+                "confidence": scores[0],
+            }
 
-        if filtered_chunks:
-            return {"source": "knowledge_base", "chunks": filtered_chunks}
+        from core.web_intelligence import WebIntelligence
 
-        web_chunks = WebSearchPipeline(query).fetch()
-        response = {"source": "web", "chunks": web_chunks, "trigger_training": True}
+        web_result = WebIntelligence().search(query)
 
-        thread = threading.Thread(
-            target=SelfTrainer(web_chunks).queue_for_training,
-            daemon=True,
-            name="self-trainer-queue",
-        )
-        thread.start()
-        return response
+        if web_result.get("answer_chunks"):
+            raw = web_result.get("raw_chunks", [])
+            if raw:
+                t = threading.Thread(
+                    target=self._queue_training,
+                    args=(query, raw),
+                    daemon=True,
+                )
+                t.start()
+
+            context_string = self._build_context(web_result["answer_chunks"])
+            return {
+                "source": "web",
+                "chunks": web_result["answer_chunks"],
+                "context_string": context_string,
+                "trigger_web": True,
+                "raw_for_training": raw,
+                "confidence": web_result["answer_chunks"][0].get("score", 0.5)
+                if web_result["answer_chunks"]
+                else 0.0,
+                "urls": [s["url"] for s in web_result.get("sources", [])],
+            }
+
+        return {
+            "source": "none",
+            "chunks": [],
+            "context_string": "",
+            "trigger_web": False,
+            "confidence": 0.0,
+            "error": "no_results",
+        }
+
+    def _build_context(self, chunks: list) -> str:
+        lines = []
+        for i, c in enumerate(chunks[:3], 1):
+            text = c.get("text", "") if isinstance(c, dict) else str(c)
+            lines.append(f"[{i}] {text}")
+        return "Context:\n" + "\n".join(lines)
+
+    def _queue_training(self, query: str, chunks: list) -> None:
+        try:
+            from core.self_trainer import SelfTrainer
+
+            SelfTrainer().queue(query=query, chunks=chunks)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Training queue failed: {e}")

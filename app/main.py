@@ -8,13 +8,16 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.core.config import get_settings
 from app.core.system_config import REQUIRED_MODULES, get_system_config
-from app.llm.loader import QuantizedLLMLoader
+from llm_loader import GirivinityLoader
 from app.monitoring.logging import configure_logging
 from app.monitoring.metrics import REQUEST_COUNTER
+from app.core.self_trainer import SelfTrainer
+from app.api.routes.admin import router as admin_router
 
 logger = logging.getLogger(__name__)
 
 _llm_runtime: dict[str, Any] = {}
+_self_trainer_process: Any | None = None
 
 
 @asynccontextmanager
@@ -22,14 +25,24 @@ async def lifespan(_: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level, structured=settings.structured_logging)
     _llm_runtime["config"] = get_system_config()
+    _start_self_trainer_once()
     if settings.auto_load_model:
-        loader = QuantizedLLMLoader(settings)
-        _llm_runtime["runtime"] = loader.load()
+        _llm_runtime["runtime"] = GirivinityLoader().get_model()
     yield
     _llm_runtime.clear()
 
 
 app = FastAPI(title="Girivinity", lifespan=lifespan)
+app.include_router(admin_router)
+
+
+def _start_self_trainer_once() -> None:
+    global _self_trainer_process
+    if _self_trainer_process is None or not _self_trainer_process.is_alive():
+        import multiprocessing
+
+        multiprocessing.set_start_method("spawn", force=True)
+        _self_trainer_process = SelfTrainer.start()
 
 
 @app.middleware("http")
@@ -58,3 +71,11 @@ def modules() -> JSONResponse:
 @app.get("/metrics")
 def metrics() -> Response:
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.on_event("startup")
+async def start_self_trainer():
+    import multiprocessing
+
+    multiprocessing.set_start_method("spawn", force=True)
+    SelfTrainer.start()

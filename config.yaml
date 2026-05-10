@@ -13,6 +13,25 @@ model:
   torch_dtype: "float16"
   load_in_4bit: true
   kv_cache: true
+  base_model_path: "models/base"
+  quantised_path: "models/girivinity_quantised/girivinity-q4_k_m.gguf"
+  n_ctx: 4096
+  n_gpu_layers: 0
+  architecture:
+    dim: 1024
+    n_layers: 16
+    n_heads: 16
+    n_kv_heads: 4
+    vocab_size: 32000
+    max_seq_len: 4096
+    ffn_multiplier: 2.667
+  quantisation:
+    input_model_path: "models/gguf/girivinity-f16.gguf"
+    output_model_path: "models/gguf/girivinity-q4_k_m.gguf"
+    quantization: "Q4_K_M"
+
+rag:
+  chroma_path: "data/chroma"
 
 crawler:
   max_depth: 2
@@ -22,6 +41,10 @@ crawler:
   obey_robots_txt: true
 
 training:
+  queue_db: "data/training_queue.sqlite3"
+  check_interval_minutes: 30
+  min_batch_size: 50
+  epochs: 3
   min_validation_samples: 1
   min_benchmark_delta: 0.0
   max_training_epochs: 1
@@ -99,3 +122,56 @@ modules:
     require_validation_dataset: true
     require_benchmark_improvement: true
     min_benchmark_delta: 0.0
+  self_training:
+    interval_seconds: 1800
+    chunk_threshold: 50
+    base_model_path: "models/base"
+    adapters_dir: "models/adapters"
+    training_queue_dir: "data/training_queue"
+    event_log_path: "logs/self_training.jsonl"
+    alerts_log_path: "logs/alerts.jsonl"
+    epochs: 3
+    learning_rate: 0.0002
+    loss_abort_threshold: 2.0
+
+self_training:
+  interval_seconds: 1800
+  chunk_threshold: 50
+  pending_collection: "pending_training"
+  trained_collection: "trained"
+  chroma_path: null
+  training_queue_dir: "data/training_queue"
+  event_log_path: "logs/self_training.jsonl"
+  alerts_log_path: "logs/alerts.jsonl"
+  base_model_path: "models/base"
+  quantised_path: "models/girivinity_quantised/girivinity-q4_k_m.gguf"
+  n_ctx: 4096
+  n_gpu_layers: 0
+  latest_adapter_path: "models/adapters/latest"
+  adapters_dir: "models/adapters"
+  epochs: 5
+  learning_rate: 0.0002
+  loss_abort_threshold: 2.0
+  batch_size: 2
+  max_length: 1024
+
+
+successor_engine:
+  check_interval_seconds: 86400
+  chunk_threshold: 100000
+  quality_threshold: 3.5
+  feedback_window: 1000
+  trained_collection: "trained"
+  chroma_path: null
+  feedback_db_path: "data/user_feedback.sqlite3"
+  training_root: "data/successor_training"
+  versions_dir: "models/versions"
+  active_model_symlink: "models/active"
+  notifications_path: "admin_notifications.jsonl"
+  state_path: "data/successor_state.json"
+  batch_size: 2
+  epochs: 1
+  learning_rate: 0.0002
+  train_seq_len: 256
+  eval_split: 0.1
+  device: "cpu"
