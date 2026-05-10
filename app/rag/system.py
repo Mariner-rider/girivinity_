@@ -21,6 +21,7 @@ class RetrievedChunk:
 class RAGResponse:
     answer: str
     sources: list[dict]
+    citations: list[str]
     confidence: float
     context: str
 
@@ -93,7 +94,19 @@ class RAGSystem:
     @secure_operation("rag.generate")
     def generate(self, query: str, top_k: int = 4) -> RAGResponse:
         profile = self.profiler.profile(query)
+
+        # 1) Query embedding + 2) vector search(top-k) occur inside retrieve().
         chunks = self.retrieve(query, top_k=top_k)
+        if not chunks:
+            return RAGResponse(
+                answer="insufficient information",
+                sources=[],
+                citations=[],
+                confidence=0.0,
+                context="",
+            )
+
+        # 3) context assembly
         context = self.build_context(chunks)
 
         sources = [
@@ -105,13 +118,18 @@ class RAGSystem:
             for chunk in chunks
         ]
 
+        citations = [f"source:{chunk.document_id}" for chunk in chunks]
+
         self.security_guard.require_grounding(sources=sources, context=context)
         prompt = self._build_prompt(query, context, profile.user_level)
+
+        # 4) grounded response
         answer = self.generator.generate(prompt)
 
         response = RAGResponse(
             answer=answer,
             sources=sources,
+            citations=citations,
             confidence=self._confidence(chunks),
             context=context,
         )
