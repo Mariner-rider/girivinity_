@@ -13,6 +13,10 @@ model:
   torch_dtype: "float16"
   load_in_4bit: true
   kv_cache: true
+  base_model_path: "models/base"
+  quantised_path: "models/girivinity_quantised/girivinity-q4_k_m.gguf"
+  n_ctx: 4096
+  n_gpu_layers: 0
   architecture:
     dim: 1024
     n_layers: 16
@@ -37,6 +41,10 @@ crawler:
   obey_robots_txt: true
 
 training:
+  queue_db: "data/training_queue.sqlite3"
+  check_interval_minutes: 30
+  min_batch_size: 50
+  epochs: 3
   min_validation_samples: 1
   min_benchmark_delta: 0.0
   max_training_epochs: 1
@@ -125,6 +133,9 @@ self_training:
   event_log_path: "logs/self_training.jsonl"
   alerts_log_path: "logs/alerts.jsonl"
   base_model_path: "models/base"
+  quantised_path: "models/girivinity_quantised/girivinity-q4_k_m.gguf"
+  n_ctx: 4096
+  n_gpu_layers: 0
   latest_adapter_path: "models/adapters/latest"
   adapters_dir: "models/adapters"
   epochs: 5
