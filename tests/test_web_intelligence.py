@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
 import sys
 import types
 
 import numpy as np
+import pytest
 
-from core.web_intelligence import WebSearchPipeline
+from core.query_router import QueryRouter
+from core.web_intelligence import WebIntelligence
 
 
 class FakeSentenceTransformer:
@@ -31,8 +34,8 @@ class FakeDDGS:
         assert query == "test query"
         assert max_results == 5
         return [
-            {"href": "https://example.com/one", "title": "One"},
-            {"href": "https://example.com/fail", "title": "Fail"},
+            {"href": "https://example.com/one", "title": "One", "body": "snippet"},
+            {"href": "https://example.com/fail", "title": "Fail", "body": "bad"},
         ]
 
 
@@ -46,10 +49,10 @@ class FakeResponse:
 
 class FakeCollection:
     def __init__(self) -> None:
-        self.added = None
+        self.upserted = None
 
-    def add(self, **kwargs) -> None:
-        self.added = kwargs
+    def upsert(self, **kwargs) -> None:
+        self.upserted = kwargs
 
 
 class FakeChromaClient:
@@ -61,17 +64,21 @@ class FakeChromaClient:
         return self.collection
 
 
-def test_web_search_pipeline_returns_scored_chunks_and_stores_training(monkeypatch):
+def test_web_intelligence_returns_scored_chunks_and_upserts_training(monkeypatch):
+    QueryRouter.reset_model_cache()
     collection = FakeCollection()
 
     def fake_http_get(url: str, **kwargs):
         if url.endswith("fail"):
             raise RuntimeError("network down")
-        assert kwargs["timeout"] == 10
+        assert kwargs["timeout"] == 8
+        assert kwargs["follow_redirects"] is True
         return FakeResponse("<html>content</html>")
 
     def fake_extract(html: str, **kwargs):
         assert html == "<html>content</html>"
+        assert kwargs["include_comments"] is False
+        assert kwargs["include_tables"] is True
         return " ".join(f"token{i}" for i in range(700))
 
     monkeypatch.setitem(
@@ -88,14 +95,49 @@ def test_web_search_pipeline_returns_scored_chunks_and_stores_training(monkeypat
         types.SimpleNamespace(Client=lambda: FakeChromaClient(collection)),
     )
 
-    result = WebSearchPipeline("test query").run()
+    result = WebIntelligence("test query").search()
 
     assert result["query"] == "test query"
     assert len(result["answer_chunks"]) == 2
     assert len(result["raw_chunks"]) == 2
     assert result["sources"] == [{"url": "https://example.com/one", "title": "One", "score": 1.0}]
-    assert collection.added is not None
-    assert collection.added["documents"] == result["answer_chunks"]
-    assert collection.added["metadatas"][0]["url"] == "https://example.com/one"
-    assert collection.added["metadatas"][0]["query"] == "test query"
-    assert collection.added["metadatas"][0]["relevance_score"] == 1.0
+    assert collection.upserted is not None
+    assert collection.upserted["documents"] == [chunk["text"] for chunk in result["raw_chunks"]]
+    assert collection.upserted["metadatas"][0]["url"] == "https://example.com/one"
+    assert collection.upserted["metadatas"][0]["query"] == "test query"
+    assert collection.upserted["metadatas"][0]["score"] == 1.0
+    assert len(collection.upserted["ids"][0]) == 64
+
+
+def test_web_intelligence_no_results_when_all_urls_fail(monkeypatch):
+    QueryRouter.reset_model_cache()
+
+    class AllFailDDGS(FakeDDGS):
+        def text(self, query: str, max_results: int):
+            return [{"href": "https://example.com/fail", "title": "Fail", "body": "bad"}]
+
+    monkeypatch.setitem(sys.modules, "duckduckgo_search", types.SimpleNamespace(DDGS=AllFailDDGS))
+    monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(get=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("fail"))))
+
+    result = WebIntelligence().search("test query")
+
+    assert result["answer_chunks"] == []
+    assert result["raw_chunks"] == []
+    assert result["sources"] == []
+    assert result["error"] == "no_results"
+    assert result["query"] == "test query"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not os.getenv("RUN_WEB_INTEGRATION"), reason="set RUN_WEB_INTEGRATION=1 to run live web integration test")
+def test_live_search_india_history_maurya_empire():
+    pytest.importorskip("duckduckgo_search")
+    pytest.importorskip("httpx")
+    pytest.importorskip("trafilatura")
+    pytest.importorskip("sentence_transformers")
+    pytest.importorskip("chromadb")
+
+    result = WebIntelligence().search("India history Maurya Empire")
+
+    assert result["answer_chunks"]
+    assert all(source["url"].startswith("http") for source in result["sources"])

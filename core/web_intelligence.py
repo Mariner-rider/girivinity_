@@ -1,270 +1,269 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import logging
-import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+LOG_PATH = Path("logs/crawler.log")
+LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 logger = logging.getLogger(__name__)
+if not any(
+    isinstance(handler, logging.FileHandler) and handler.baseFilename == str(LOG_PATH.resolve())
+    for handler in logger.handlers
+):
+    file_handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(file_handler)
+logger.setLevel(logging.INFO)
 
 
 @dataclass(slots=True)
 class SearchResult:
     url: str
     title: str
+    body: str = ""
 
 
 @dataclass(slots=True)
-class ScoredChunk:
+class WebChunk:
     text: str
     url: str
     title: str
-    score: float
-    embedding: list[float]
+    chunk_index: int
+    score: float = 0.0
+    embedding: list[float] | None = None
+
+    def as_public_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "url": self.url,
+            "title": self.title,
+            "chunk_index": self.chunk_index,
+            "score": self.score,
+        }
 
 
-class WebSearchPipeline:
-    """Autonomous web intelligence pipeline for live search and training intake.
-
-    The pipeline performs real DuckDuckGo searches, fetches returned pages, extracts
-    readable article text, scores text chunks against the original query, and stores
-    relevant raw chunks in ChromaDB for later training review.
-    """
+class WebIntelligence:
+    """Live web search, extraction, chunk scoring, and training-intake pipeline."""
 
     def __init__(
         self,
-        query: str,
+        query: str | None = None,
         *,
         max_results: int = 5,
-        chunk_tokens: int = 400,
-        chunk_overlap: int = 50,
-        relevance_threshold: float = 0.5,
-        model_name: str = "all-MiniLM-L6-v2",
+        max_chars: int = 1600,
+        overlap_chars: int = 200,
+        relevance_threshold: float = 0.45,
         chroma_collection: str = "pending_training",
     ) -> None:
-        self.query = query.strip()
+        self.query = (query or "").strip()
         self.max_results = max_results
-        self.chunk_tokens = chunk_tokens
-        self.chunk_overlap = chunk_overlap
+        self.max_chars = max_chars
+        self.overlap_chars = overlap_chars
         self.relevance_threshold = relevance_threshold
         self.chroma_collection = chroma_collection
 
-        sentence_transformers = importlib.import_module("sentence_transformers")
-        self._embedder = sentence_transformers.SentenceTransformer(model_name)
+    def search(self, query: str | None = None) -> dict[str, Any]:
+        query = (query or self.query).strip()
+        timestamp = datetime.utcnow().isoformat()
+        if not query:
+            return self._no_results(query, timestamp)
 
-    def run(self) -> dict[str, Any]:
-        """Execute the full web intelligence pipeline and return structured results."""
-        timestamp = datetime.now(timezone.utc).isoformat()
-        if not self.query:
-            return self._empty_response(timestamp)
-
-        scored_chunks: list[ScoredChunk] = []
-        for result in self._search():
-            html = self._fetch_url(result.url)
-            if not html:
+        search_results = self._duckduckgo_search(query)
+        scored_chunks: list[WebChunk] = []
+        for result in search_results:
+            html = self._fetch(result.url)
+            if html is None:
                 continue
-
             text = self._extract_text(html, result.url)
             if not text:
                 continue
+            scored_chunks.extend(self._score_chunks(query, self._chunk_text(text, result)))
 
-            chunks = self._chunk_text(text)
-            if not chunks:
-                continue
+        kept_chunks = [chunk for chunk in scored_chunks if chunk.score > self.relevance_threshold]
+        kept_chunks.sort(key=lambda chunk: chunk.score, reverse=True)
+        if not kept_chunks:
+            return self._no_results(query, timestamp)
 
-            scored_chunks.extend(self._score_chunks(chunks, result))
-
-        relevant_chunks = [
-            chunk for chunk in scored_chunks if chunk.score > self.relevance_threshold
-        ]
-        relevant_chunks.sort(key=lambda chunk: chunk.score, reverse=True)
-
-        self._store_raw_chunks(relevant_chunks, timestamp)
-
+        raw_chunks = [chunk.as_public_dict() for chunk in kept_chunks]
+        self._store_raw_chunks(kept_chunks, query, timestamp)
         return {
-            "answer_chunks": [chunk.text for chunk in relevant_chunks[:3]],
-            "sources": self._build_sources(relevant_chunks),
-            "raw_chunks": [self._serialize_chunk(chunk) for chunk in relevant_chunks],
-            "query": self.query,
+            "answer_chunks": raw_chunks[:3],
+            "raw_chunks": raw_chunks,
+            "sources": self._sources(kept_chunks),
+            "query": query,
             "timestamp": timestamp,
         }
+
+    def run(self) -> dict[str, Any]:
+        """Compatibility alias for older callers."""
+        return self.search(self.query)
 
     def fetch(self) -> list[str]:
-        """Compatibility helper returning only top answer chunk text."""
-        return list(self.run()["answer_chunks"])
+        """Compatibility helper returning answer chunk text only."""
+        return [chunk["text"] for chunk in self.search(self.query).get("answer_chunks", [])]
 
-    def _empty_response(self, timestamp: str) -> dict[str, Any]:
-        return {
-            "answer_chunks": [],
-            "sources": [],
-            "raw_chunks": [],
-            "query": self.query,
-            "timestamp": timestamp,
-        }
-
-    def _search(self) -> list[SearchResult]:
-        duckduckgo_search = importlib.import_module("duckduckgo_search")
-        results: list[SearchResult] = []
-        seen_urls: set[str] = set()
-
+    def _duckduckgo_search(self, query: str) -> list[SearchResult]:
         try:
-            with duckduckgo_search.DDGS() as ddgs:
-                search_rows = ddgs.text(self.query, max_results=self.max_results)
-                for row in search_rows:
-                    url = str(row.get("href") or row.get("url") or "").strip()
-                    if not url or url in seen_urls:
-                        continue
-                    title = self._clean_whitespace(str(row.get("title") or ""))
-                    results.append(SearchResult(url=url, title=title))
-                    seen_urls.add(url)
-                    if len(results) >= self.max_results:
-                        break
-        except Exception as exc:  # DuckDuckGo/network failures should not crash pipeline.
-            logger.warning("DuckDuckGo search failed for query %r: %s", self.query, exc)
+            from duckduckgo_search import DDGS  # type: ignore
 
-        return results
-
-    def _fetch_url(self, url: str) -> str | None:
-        httpx = importlib.import_module("httpx")
-        try:
-            response = httpx.get(
-                url,
-                timeout=10,
-                follow_redirects=True,
-                headers={"User-Agent": "girivinity-web-intelligence/0.1"},
-            )
-            response.raise_for_status()
-            return response.text
-        except Exception as exc:  # Per-URL failures should return partial results.
-            logger.warning("Failed to fetch %s: %s", url, exc)
-            return None
-
-    def _extract_text(self, html: str, url: str) -> str:
-        trafilatura = importlib.import_module("trafilatura")
-        try:
-            extracted = trafilatura.extract(
-                html,
-                url=url,
-                include_comments=False,
-                include_tables=False,
-                favor_recall=True,
-            )
+            with DDGS() as ddgs:
+                rows = list(ddgs.text(query, max_results=self.max_results))
         except Exception as exc:
-            logger.warning("Text extraction failed for %s: %s", url, exc)
-            return ""
-        return self._clean_whitespace(extracted or "")
-
-    def _chunk_text(self, text: str) -> list[str]:
-        tokens = text.split()
-        if not tokens:
+            logger.exception("DuckDuckGo search failed for query %r: %s", query, exc)
             return []
 
-        size = max(1, self.chunk_tokens)
-        overlap = min(max(0, self.chunk_overlap), size - 1)
-        step = max(1, size - overlap)
+        results: list[SearchResult] = []
+        seen: set[str] = set()
+        for row in rows:
+            url = str(row.get("href") or row.get("url") or "").strip()
+            if not url or url in seen:
+                continue
+            results.append(
+                SearchResult(
+                    url=url,
+                    title=str(row.get("title") or "").strip(),
+                    body=str(row.get("body") or "").strip(),
+                )
+            )
+            seen.add(url)
+        return results[: self.max_results]
 
-        chunks: list[str] = []
-        for start in range(0, len(tokens), step):
-            chunk = " ".join(tokens[start : start + size]).strip()
-            if chunk:
-                chunks.append(chunk)
-            if start + size >= len(tokens):
+    def _fetch(self, url: str) -> str | None:
+        try:
+            import httpx
+
+            response = httpx.get(url, timeout=8, follow_redirects=True)
+            response.raise_for_status()
+            return response.text
+        except Exception as exc:
+            logger.exception("Failed to fetch %s: %s", url, exc)
+            return None
+
+    def _extract_text(self, html_content: str, url: str) -> str | None:
+        try:
+            import trafilatura
+
+            text = trafilatura.extract(
+                html_content,
+                include_comments=False,
+                include_tables=True,
+            )
+        except Exception as exc:
+            logger.exception("Trafilatura extraction failed for %s: %s", url, exc)
+            return None
+        if text is None:
+            return None
+        text = " ".join(text.split())
+        return text or None
+
+    def _chunk_text(self, text: str, result: SearchResult) -> list[WebChunk]:
+        if not text:
+            return []
+        chunk_size = max(1, self.max_chars)
+        overlap = min(max(0, self.overlap_chars), chunk_size - 1)
+        step = max(1, chunk_size - overlap)
+        chunks: list[WebChunk] = []
+        for index, start in enumerate(range(0, len(text), step)):
+            segment = text[start : start + chunk_size].strip()
+            if segment:
+                chunks.append(
+                    WebChunk(
+                        text=segment,
+                        url=result.url,
+                        title=result.title,
+                        chunk_index=index,
+                    )
+                )
+            if start + chunk_size >= len(text):
                 break
         return chunks
 
-    def _score_chunks(self, chunks: list[str], result: SearchResult) -> list[ScoredChunk]:
+    def _score_chunks(self, query: str, chunks: list[WebChunk]) -> list[WebChunk]:
+        if not chunks:
+            return []
         try:
-            embeddings = self._embedder.encode(
-                [self.query, *chunks],
+            from core.query_router import QueryRouter
+
+            embedder = QueryRouter._get_embedder()
+            embeddings = embedder.encode(
+                [query, *[chunk.text for chunk in chunks]],
                 convert_to_numpy=True,
                 normalize_embeddings=True,
             )
         except TypeError:
-            embeddings = self._embedder.encode([self.query, *chunks], convert_to_numpy=True)
+            embeddings = embedder.encode([query, *[chunk.text for chunk in chunks]], convert_to_numpy=True)
             embeddings = self._normalize_rows(np.asarray(embeddings, dtype=np.float32))
         except Exception as exc:
-            logger.warning("Embedding failed for %s: %s", result.url, exc)
+            logger.exception("Chunk relevance scoring failed: %s", exc)
             return []
 
-        embedding_array = np.asarray(embeddings, dtype=np.float32)
-        if embedding_array.ndim != 2 or embedding_array.shape[0] != len(chunks) + 1:
-            logger.warning("Unexpected embedding shape for %s: %s", result.url, embedding_array.shape)
+        arr = np.asarray(embeddings, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[0] != len(chunks) + 1:
+            logger.error("Unexpected embedding shape during web scoring: %s", arr.shape)
             return []
-
-        query_embedding = embedding_array[0]
-        scored: list[ScoredChunk] = []
-        for text, chunk_embedding in zip(chunks, embedding_array[1:]):
-            score = float(np.dot(query_embedding, chunk_embedding))
-            scored.append(
-                ScoredChunk(
-                    text=text,
-                    url=result.url,
-                    title=result.title,
-                    score=score,
-                    embedding=chunk_embedding.astype(float).tolist(),
-                )
-            )
-        return scored
+        query_embedding = arr[0]
+        for chunk, chunk_embedding in zip(chunks, arr[1:]):
+            chunk.score = float(np.dot(query_embedding, chunk_embedding))
+            chunk.embedding = chunk_embedding.astype(float).tolist()
+        return chunks
 
     def _normalize_rows(self, embeddings: np.ndarray) -> np.ndarray:
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         return embeddings / norms
 
-    def _store_raw_chunks(self, chunks: list[ScoredChunk], timestamp: str) -> None:
+    def _store_raw_chunks(self, chunks: list[WebChunk], query: str, timestamp: str) -> None:
         if not chunks:
             return
-
         try:
-            chromadb = importlib.import_module("chromadb")
+            import chromadb  # type: ignore
+
             client = chromadb.Client()
             collection = client.get_or_create_collection(name=self.chroma_collection)
-            collection.add(
-                ids=[self._chunk_id(chunk, timestamp, index) for index, chunk in enumerate(chunks)],
+            collection.upsert(
+                ids=[self._chunk_id(chunk) for chunk in chunks],
                 documents=[chunk.text for chunk in chunks],
-                embeddings=[chunk.embedding for chunk in chunks],
                 metadatas=[
                     {
                         "url": chunk.url,
+                        "query": query,
+                        "score": chunk.score,
                         "timestamp": timestamp,
-                        "query": self.query,
-                        "relevance_score": chunk.score,
                     }
                     for chunk in chunks
                 ],
+                embeddings=[chunk.embedding for chunk in chunks] if chunks[0].embedding is not None else None,
             )
         except Exception as exc:
-            logger.warning("Failed to store raw chunks in ChromaDB: %s", exc)
+            logger.exception("Failed to upsert web chunks into ChromaDB: %s", exc)
 
-    def _build_sources(self, chunks: list[ScoredChunk]) -> list[dict[str, Any]]:
-        sources_by_url: dict[str, dict[str, Any]] = {}
+    def _chunk_id(self, chunk: WebChunk) -> str:
+        return hashlib.sha256(f"{chunk.url}{chunk.chunk_index}".encode("utf-8")).hexdigest()
+
+    def _sources(self, chunks: list[WebChunk]) -> list[dict[str, Any]]:
+        by_url: dict[str, dict[str, Any]] = {}
         for chunk in chunks:
-            existing = sources_by_url.get(chunk.url)
+            existing = by_url.get(chunk.url)
             if existing is None or chunk.score > existing["score"]:
-                sources_by_url[chunk.url] = {
-                    "url": chunk.url,
-                    "title": chunk.title,
-                    "score": chunk.score,
-                }
-        sources = sorted(sources_by_url.values(), key=lambda item: item["score"], reverse=True)
-        return sources[: self.max_results]
+                by_url[chunk.url] = {"url": chunk.url, "title": chunk.title, "score": chunk.score}
+        return sorted(by_url.values(), key=lambda source: source["score"], reverse=True)
 
-    def _serialize_chunk(self, chunk: ScoredChunk) -> dict[str, Any]:
+    def _no_results(self, query: str, timestamp: str) -> dict[str, Any]:
         return {
-            "text": chunk.text,
-            "url": chunk.url,
-            "title": chunk.title,
-            "score": chunk.score,
+            "answer_chunks": [],
+            "raw_chunks": [],
+            "sources": [],
+            "error": "no_results",
+            "query": query,
+            "timestamp": timestamp,
         }
 
-    def _chunk_id(self, chunk: ScoredChunk, timestamp: str, index: int) -> str:
-        payload = f"{timestamp}\0{self.query}\0{chunk.url}\0{index}\0{chunk.text}"
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def _clean_whitespace(self, value: str) -> str:
-        return re.sub(r"\s+", " ", value).strip()
+class WebSearchPipeline(WebIntelligence):
+    """Backward-compatible name for older callers."""

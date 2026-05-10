@@ -26,6 +26,9 @@ model:
     output_model_path: "models/gguf/girivinity-q4_k_m.gguf"
     quantization: "Q4_K_M"
 
+rag:
+  chroma_path: "data/chroma"
+
 crawler:
   max_depth: 2
   concurrent_requests: 32

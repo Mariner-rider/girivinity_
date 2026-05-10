@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import logging
@@ -210,6 +211,41 @@ class SelfTrainer(Thread):
         self.config = config or SelfTrainingConfig.from_yaml(config_path)
         self._stop_event = Event()
         self._training_process: mp.Process | None = None
+
+    def queue(self, query: str, chunks: list[Any]) -> None:
+        """Queue freshly retrieved chunks in ChromaDB pending_training without blocking callers."""
+        if not chunks:
+            return
+        timestamp = datetime.now(timezone.utc).isoformat()
+        documents: list[str] = []
+        metadatas: list[dict[str, Any]] = []
+        ids: list[str] = []
+        for index, chunk in enumerate(chunks):
+            if isinstance(chunk, dict):
+                text = str(chunk.get("text") or chunk.get("chunk") or "").strip()
+                url = str(chunk.get("url") or "")
+                relevance_score = float(chunk.get("score") or chunk.get("relevance_score") or 0.0)
+            else:
+                text = str(chunk).strip()
+                url = ""
+                relevance_score = 0.0
+            if not text:
+                continue
+            documents.append(text)
+            metadatas.append(
+                {
+                    "url": url,
+                    "timestamp": timestamp,
+                    "query": query,
+                    "relevance_score": relevance_score,
+                }
+            )
+            payload = f"{query}\0{timestamp}\0{index}\0{text}"
+            ids.append("queued-" + hashlib.sha256(payload.encode("utf-8")).hexdigest())
+        if not documents:
+            return
+        collection = self._get_collection(self.config.pending_collection)
+        collection.add(ids=ids, documents=documents, metadatas=metadatas)
 
     def run(self) -> None:
         while not self._stop_event.is_set():
