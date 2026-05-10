@@ -58,10 +58,13 @@ class ResearchAgent:
         hidden_scratchpad: list[str],
     ) -> AgentResult:
         hidden_scratchpad.append(f"Researching task: {task}")
-        findings = f"Collected background facts for: {task}"
+        from core.query_router import QueryRouter
+
+        result = QueryRouter().route(task)
+        findings = result["context_string"]
         memory.add_fact(findings)
         mailbox.append(AgentMessage(self.name, "reasoning_agent", findings))
-        return AgentResult(self.name, findings, confidence=0.72, citations=["internal:memory"])
+        return AgentResult(self.name, findings, confidence=result["confidence"], citations=result["urls"])
 
 
 class ReasoningAgent:
