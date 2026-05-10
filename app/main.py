@@ -11,7 +11,7 @@ from app.core.system_config import REQUIRED_MODULES, get_system_config
 from llm_loader import GirivinityLoader
 from app.monitoring.logging import configure_logging
 from app.monitoring.metrics import REQUEST_COUNTER
-from core.self_trainer import SelfTrainer
+from app.core.self_trainer import SelfTrainer
 from app.api.routes.admin import router as admin_router
 
 logger = logging.getLogger(__name__)
@@ -72,4 +72,7 @@ def metrics() -> Response:
 
 @app.on_event("startup")
 async def start_self_trainer():
-    _start_self_trainer_once()
+    import multiprocessing
+
+    multiprocessing.set_start_method("spawn", force=True)
+    SelfTrainer.start()
