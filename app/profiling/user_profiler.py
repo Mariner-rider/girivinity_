@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from app.security.policy import secure_operation
+
 
 @dataclass(slots=True)
 class ProfileResult:
@@ -19,6 +21,7 @@ class UserProfiler:
         "api", "model", "database", "vector", "pipeline", "memory", "context", "prompt",
     }
 
+    @secure_operation("profiling.profile_user")
     def profile(self, prompt: str) -> ProfileResult:
         tokens = re.findall(r"[a-zA-Z_]+", prompt.lower())
         if not tokens:
@@ -29,7 +32,10 @@ class UserProfiler:
         intermediate_hits = len(unique & self._INTERMEDIATE_TERMS)
         avg_word_len = sum(len(t) for t in tokens) / len(tokens)
 
-        vocabulary_score = round((advanced_hits * 1.0 + intermediate_hits * 0.5 + avg_word_len / 10.0), 3)
+        vocabulary_score = round(
+            advanced_hits * 1.0 + intermediate_hits * 0.5 + avg_word_len / 10.0,
+            3,
+        )
 
         if vocabulary_score >= 3.0 or advanced_hits >= 3:
             level = "expert"

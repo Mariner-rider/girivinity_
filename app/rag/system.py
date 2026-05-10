@@ -6,6 +6,7 @@ from typing import Protocol
 import numpy as np
 
 from app.profiling.user_profiler import UserProfiler
+from app.security.policy import SecurityGuard, secure_operation
 
 
 @dataclass(slots=True)
@@ -40,11 +41,19 @@ class Generator(Protocol):
 
 
 class RAGSystem:
-    def __init__(self, embedder: QueryEmbedder, searcher: VectorSearcher, generator: Generator, profiler: UserProfiler | None = None) -> None:
+    def __init__(
+        self,
+        embedder: QueryEmbedder,
+        searcher: VectorSearcher,
+        generator: Generator,
+        profiler: UserProfiler | None = None,
+        security_guard: SecurityGuard | None = None,
+    ) -> None:
         self.embedder = embedder
         self.searcher = searcher
         self.generator = generator
         self.profiler = profiler or UserProfiler()
+        self.security_guard = security_guard or SecurityGuard()
 
     def build_context(self, chunks: list[RetrievedChunk], max_chars: int = 2500) -> str:
         blocks: list[str] = []
@@ -75,16 +84,17 @@ class RAGSystem:
         top_scores = [max(0.0, min(1.0, float(chunk.score))) for chunk in chunks[:3]]
         return round(sum(top_scores) / len(top_scores), 3)
 
+    @secure_operation("rag.retrieve")
     def retrieve(self, query: str, top_k: int = 4) -> list[RetrievedChunk]:
+        self.security_guard.validate_prompt(query)
         query_vector = self.embedder.encode(query)
         return self.searcher.search(query_vector, top_k=top_k)
 
+    @secure_operation("rag.generate")
     def generate(self, query: str, top_k: int = 4) -> RAGResponse:
         profile = self.profiler.profile(query)
         chunks = self.retrieve(query, top_k=top_k)
         context = self.build_context(chunks)
-        prompt = self._build_prompt(query, context, profile.user_level)
-        answer = self.generator.generate(prompt)
 
         sources = [
             {
@@ -94,6 +104,10 @@ class RAGSystem:
             }
             for chunk in chunks
         ]
+
+        self.security_guard.require_grounding(sources=sources, context=context)
+        prompt = self._build_prompt(query, context, profile.user_level)
+        answer = self.generator.generate(prompt)
 
         response = RAGResponse(
             answer=answer,

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from app.security.policy import SecurityGuard, secure_operation
+
 
 @dataclass(slots=True)
 class AgentResult:
@@ -48,7 +50,7 @@ class ReasoningAgent:
         hidden_scratchpad.append(f"Reasoning over {len(memory.facts)} facts")
         conclusion = f"Reasoned plan for '{task}' using {len(memory.facts)} facts."
         memory.notes["draft_plan"] = conclusion
-        return AgentResult(self.name, conclusion, confidence=0.79)
+        return AgentResult(self.name, conclusion, confidence=0.79, citations=["internal:memory"])
 
 
 class CriticAgent:
@@ -59,17 +61,25 @@ class CriticAgent:
         hidden_scratchpad.append("Critiquing draft plan for risks and gaps")
         critique = f"Critique for '{task}': validate assumptions in -> {draft}"
         memory.notes["critique"] = critique
-        return AgentResult(self.name, critique, confidence=0.75)
+        return AgentResult(
+            self.name,
+            critique,
+            confidence=0.75,
+            citations=["internal:memory", "internal:draft_plan"],
+        )
 
 
 class AgentController:
-    def __init__(self) -> None:
+    def __init__(self, security_guard: SecurityGuard | None = None) -> None:
+        self.security_guard = security_guard or SecurityGuard()
         self.memory = SharedMemory()
         self.research_agent = ResearchAgent()
         self.reasoning_agent = ReasoningAgent()
         self.critic_agent = CriticAgent()
 
+    @secure_operation("agents.route_task")
     def route_task(self, task: str) -> list[Agent]:
+        self.security_guard.validate_prompt(task)
         lowered = task.lower()
         route: list[Agent] = [self.research_agent, self.reasoning_agent, self.critic_agent]
 
@@ -79,7 +89,9 @@ class AgentController:
             route = [self.research_agent, self.reasoning_agent, self.critic_agent]
         return route
 
+    @secure_operation("agents.execute")
     def execute(self, task: str) -> dict:
+        self.security_guard.validate_prompt(task)
         agents = self.route_task(task)
         hidden_scratchpad: list[str] = []
         results: list[AgentResult] = []
@@ -88,6 +100,9 @@ class AgentController:
             results.append(agent.run(task, self.memory, hidden_scratchpad))
 
         avg_conf = round(sum(item.confidence for item in results) / max(len(results), 1), 3)
+        sources = sorted({citation for item in results for citation in item.citations})
+        context = "\n".join(self.memory.facts + list(self.memory.notes.values()))
+        self.security_guard.require_grounding(sources=sources, context=context)
 
         return {
             "task": task,
@@ -102,6 +117,7 @@ class AgentController:
             ],
             "final": results[-1].output if results else "",
             "confidence": avg_conf,
+            "sources": sources,
             "shared_memory": {
                 "facts": list(self.memory.facts),
                 "notes": dict(self.memory.notes),

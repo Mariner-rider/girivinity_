@@ -55,7 +55,7 @@ def load_config(path: str | Path = "config.yaml") -> ModelConfig:
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
     raw: dict[str, Any] = yaml.safe_load(config_path.read_text()) or {}
-    llm_cfg = raw.get("llm")
+    llm_cfg = raw.get("llm") or raw.get("modules", {}).get("llm")
     if not isinstance(llm_cfg, dict):
         raise LLMConfigError("Expected top-level 'llm' mapping in config.yaml")
 

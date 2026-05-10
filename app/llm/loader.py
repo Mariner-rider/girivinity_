@@ -6,6 +6,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from app.core.config import Settings
 from app.monitoring.metrics import MODEL_LOAD_SECONDS
+from app.security.policy import secure_operation
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class QuantizedLLMLoader:
             bnb_4bit_compute_dtype=dtype,
         )
 
+    @secure_operation("llm.load_quantized")
     def load(self) -> LoadedLLM:
         logger.info("Loading quantized model", extra={"model_id": self.settings.model_id})
 

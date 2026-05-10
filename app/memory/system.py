@@ -9,6 +9,8 @@ import faiss
 import numpy as np
 from transformers import AutoModel, AutoTokenizer
 
+from app.security.policy import SecurityGuard, secure_operation
+
 
 class Embedder(Protocol):
     def encode(self, texts: list[str]) -> np.ndarray:
@@ -47,13 +49,17 @@ class MemorySystem:
         embedding_dim: int = 384,
         short_term_limit: int = 50,
         embedder: Embedder | None = None,
+        security_guard: SecurityGuard | None = None,
     ) -> None:
         self.short_term = deque(maxlen=short_term_limit)
         self.embedder = embedder or HFTextEmbedder()
         self.index = faiss.IndexFlatIP(embedding_dim)
         self.records: list[MemoryRecord] = []
+        self.security_guard = security_guard or SecurityGuard()
 
+    @secure_operation("memory.store")
     def store_memory(self, text: str, metadata: dict | None = None) -> int:
+        self.security_guard.validate_prompt(text)
         metadata = metadata or {}
         vector = self.embedder.encode([text])
         self.index.add(vector)
@@ -64,10 +70,13 @@ class MemorySystem:
         self.short_term.append(record)
         return memory_id
 
+    @secure_operation("memory.retrieve")
     def retrieve_memory(self, memory_id: int) -> MemoryRecord:
         return self.records[memory_id]
 
+    @secure_operation("memory.similarity_search")
     def similarity_search(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
+        self.security_guard.validate_prompt(query)
         if not self.records:
             return []
 

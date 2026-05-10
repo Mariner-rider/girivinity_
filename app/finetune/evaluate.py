@@ -7,6 +7,8 @@ from datasets import load_dataset
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from app.security.policy import SecurityGuard, secure_operation
+
 
 @dataclass(slots=True)
 class EvalResult:
@@ -14,7 +16,16 @@ class EvalResult:
     exact_match: float
 
 
-def evaluate_adapter(model_id: str, adapter_path: str, eval_dataset_path: str, max_new_tokens: int = 64) -> EvalResult:
+@secure_operation("finetune.evaluate_adapter")
+def evaluate_adapter(
+    model_id: str,
+    adapter_path: str,
+    eval_dataset_path: str,
+    max_new_tokens: int = 64,
+    security_guard: SecurityGuard | None = None,
+) -> EvalResult:
+    guard = security_guard or SecurityGuard()
+    guard.require_validation_dataset(eval_dataset_path)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     base_model = AutoModelForCausalLM.from_pretrained(model_id, device_map="auto")
     model = PeftModel.from_pretrained(base_model, adapter_path)
