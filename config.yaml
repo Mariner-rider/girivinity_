@@ -1,0 +1,101 @@
+app:
+  name: "Girivinity"
+  environment: "dev"
+  host: "0.0.0.0"
+  port: 8000
+  log_level: "INFO"
+  structured_logging: true
+  auto_load_model: false
+
+model:
+  model_id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+  device_map: "auto"
+  torch_dtype: "float16"
+  load_in_4bit: true
+  kv_cache: true
+
+crawler:
+  max_depth: 2
+  concurrent_requests: 32
+  download_timeout_seconds: 15
+  trust_threshold: 0.6
+  obey_robots_txt: true
+
+training:
+  min_validation_samples: 1
+  min_benchmark_delta: 0.0
+  max_training_epochs: 1
+  require_validation_dataset: true
+  require_benchmark_improvement: true
+
+security:
+  require_grounding: true
+  require_trusted_crawler_urls: true
+  prompt_max_chars: 12000
+  allow_remote_code: false
+
+feature_flags:
+  enable_rag: true
+  enable_crawler: true
+  enable_training: true
+  enable_multimodal: false
+  enable_analytics: true
+
+modules:
+  core:
+    enabled: true
+    config_source: "config.yaml"
+  llm:
+    enabled: true
+    model_id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    device_map: "auto"
+    trust_remote_code: false
+    attn_implementation: "sdpa"
+    torch_dtype: "float16"
+    kv_cache: true
+    load_in_4bit: true
+    bnb_4bit_quant_type: "nf4"
+    bnb_4bit_use_double_quant: true
+    bnb_4bit_compute_dtype: "float16"
+  memory:
+    enabled: true
+    backend: "faiss"
+    embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_dim: 384
+    short_term_limit: 50
+  agents:
+    enabled: true
+    default_route:
+      - "research_agent"
+      - "reasoning_agent"
+      - "critic_agent"
+  crawler:
+    enabled: true
+    obey_robots_txt: true
+    concurrent_requests: 32
+    max_depth: 2
+    trust_threshold: 0.6
+  rag:
+    enabled: true
+    top_k: 4
+    max_context_chars: 2500
+    require_sources: true
+  security:
+    enabled: true
+    require_grounding: true
+    require_validation_for_training: true
+    require_benchmark_improvement: true
+  analytics:
+    enabled: true
+    sink: "in_memory"
+  multimodal:
+    enabled: true
+    text: true
+    images: false
+    audio: false
+  training:
+    enabled: true
+    method: "lora"
+    require_validation_dataset: true
+    require_benchmark_improvement: true
+    min_benchmark_delta: 0.0
