@@ -101,7 +101,21 @@ class LLMSynthesiser:
                 yield f"\n  [{i}] {url}"
 
     def _build_prompt(self, query: str, context: str) -> str:
-        return f"{SYSTEM_PROMPT}\n\n" f"Context:\n{context}\n\n" f"Question: {query}\n\n" f"Answer:"
+        skill_block = ""
+        try:
+            from app.core.skill_forge import SkillForge
+            skill = SkillForge().get_skill_for_query(query)
+            if skill:
+                skill_block = f"\n\n{skill.to_prompt_block()}"
+        except Exception as exc:
+            logger.warning("SkillForge lookup failed: %s", exc)
+        return (
+            f"{SYSTEM_PROMPT}"
+            f"{skill_block}\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {query}\n\n"
+            f"Answer:"
+        )
 
     def _extraction_fallback(self, query: str, context: str, urls: list[str]) -> str:
         """Used when no LLM is loaded. Returns clean structured answer."""

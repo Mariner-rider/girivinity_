@@ -16,6 +16,8 @@ from app.core.successor_engine import SuccessorEngine
 from app.api.routes.admin import router as admin_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.health import router as health_router
+from app.api.routes.skills import router as skills_router
+from app.api.routes.cuda import router as cuda_router
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,8 @@ app = FastAPI(title="Girivinity", lifespan=lifespan)
 app.include_router(chat_router)
 app.include_router(health_router)
 app.include_router(admin_router)
+app.include_router(skills_router)
+app.include_router(cuda_router)
 
 
 def _start_self_trainer_once() -> None:
@@ -86,3 +90,9 @@ async def start_self_trainer():
 @app.on_event("startup")
 async def start_successor_engine():
     SuccessorEngine.start()
+
+
+@app.on_event("startup")
+async def bootstrap_cuda():
+    from app.core.cuda_crawler import CUDACrawler
+    CUDACrawler().bootstrap_async()
