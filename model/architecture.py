@@ -8,19 +8,26 @@ import torch.nn.functional as F
 
 @dataclass
 class GirivinityConfig:
-    dim: int = 1024
-    n_layers: int = 16
-    n_heads: int = 16
-    n_kv_heads: int = 4
+    # Girivinity 3B — ~2.92B parameters
+    dim: int = 3072
+    n_layers: int = 28
+    n_heads: int = 24
+    n_kv_heads: int = 8
     vocab_size: int = 32000
     max_seq_len: int = 4096
     ffn_multiplier: float = 2.667
     norm_eps: float = 1e-5
-    rope_theta: float = 10000.0
+    rope_theta: float = 500000.0   # Extended RoPE for longer context
 
     @property
     def head_dim(self) -> int:
-        return self.dim // self.n_heads
+        return self.dim // self.n_heads   # 128
+
+    @property
+    def ffn_dim(self) -> int:
+        # Round to nearest multiple of 256 for hardware efficiency
+        raw = int(self.dim * self.ffn_multiplier)
+        return (raw + 255) // 256 * 256  # 8192
 
     @property
     def ffn_dim(self) -> int:
@@ -31,7 +38,16 @@ class GirivinityConfig:
         import yaml
         from pathlib import Path
         raw = yaml.safe_load(Path(path).read_text()).get("architecture", {})
-        return cls(**{k: v for k, v in raw.items() if k in cls.__dataclass_fields__})
+        return cls(**{k: v for k, v in raw.items()
+                     if k in cls.__dataclass_fields__})
+
+    @classmethod
+    def small(cls) -> "GirivinityConfig":
+        """360M config for edge/testing use."""
+        return cls(
+            dim=1024, n_layers=16, n_heads=16, n_kv_heads=4,
+            vocab_size=32000, max_seq_len=4096, ffn_multiplier=2.667,
+        )
 
 
 class RMSNorm(nn.Module):
@@ -207,3 +223,16 @@ class GirivinityModel(nn.Module):
     def param_count(self) -> str:
         n = sum(p.numel() for p in self.parameters())
         return f"{n / 1e6:.1f}M parameters"
+
+    def param_count_detailed(self) -> dict:
+        embed = sum(p.numel() for p in self.embed.parameters())
+        layers = sum(p.numel() for p in self.layers.parameters())
+        norm = sum(p.numel() for p in self.norm.parameters())
+        total = sum(p.numel() for p in self.parameters())
+        return {
+            "total": f"{total/1e9:.3f}B",
+            "embedding": f"{embed/1e6:.1f}M",
+            "layers": f"{layers/1e9:.3f}B",
+            "norm": f"{norm/1e3:.1f}K",
+            "per_layer": f"{layers/self.cfg.n_layers/1e6:.1f}M",
+        }

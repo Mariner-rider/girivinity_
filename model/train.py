@@ -2,6 +2,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import time
 from pathlib import Path
 
@@ -62,18 +63,23 @@ def train(
     data_path: str,
     tokeniser_path: str,
     output_dir: str,
-    epochs: int = 3,
-    batch_size: int = 4,
-    lr: float = 3e-4,
-    grad_accum: int = 8,
-    max_len: int = 1024,
-    save_every: int = 1000,
+    epochs: int = 2,
+    batch_size: int = 2,
+    lr: float = 1.5e-4,
+    grad_accum: int = 16,
+    max_len: int = 2048,
+    save_every: int = 500,
+    warmup_steps: int = 100,
 ) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Training on device: %s", device)
 
     cfg = GirivinityConfig.from_yaml()
     model = GirivinityModel(cfg).to(device)
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable()
+    # Manual gradient checkpointing for custom model
+    model.train()
     logger.info("Model: %s", model.param_count())
 
     dataset = InstructionDataset(data_path, tokeniser_path, max_len)
@@ -84,11 +90,22 @@ def train(
     logger.info("Dataset: %d samples", len(dataset))
 
     optimiser = torch.optim.AdamW(
-        model.parameters(), lr=lr, weight_decay=0.1, betas=(0.9, 0.95)
+        model.parameters(),
+        lr=lr,
+        weight_decay=0.1,
+        betas=(0.9, 0.95),
+        eps=1e-8,
+        fused=torch.cuda.is_available(),
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimiser, T_max=epochs * len(loader)
-    )
+
+    # Warmup + cosine schedule
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return step / max(1, warmup_steps)
+        progress = (step - warmup_steps) / max(1, epochs * len(loader) - warmup_steps)
+        return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimiser, lr_lambda)
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
