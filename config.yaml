@@ -190,3 +190,13 @@ cuda_engine:
   arch: sm_80
   max_compile_retries: 3
   kernels_dir: data/cuda_kernels
+
+
+database:
+  host:     localhost
+  port:     5432
+  name:     girivinity
+  user:     girivinity_user
+  password: changeme
+  pool_min_conn: 2
+  pool_max_conn: 10

@@ -2,12 +2,12 @@ from __future__ import annotations
 import json
 import logging
 import multiprocessing
-import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
 
 import yaml
+from app.core import db
 
 logger = logging.getLogger(__name__)
 
@@ -16,14 +16,12 @@ class SuccessorEngine:
     def __init__(self) -> None:
         cfg = yaml.safe_load(Path("config.yaml").read_text())
         se = cfg["successor_engine"]
-        tr = cfg["training"]
         self.check_interval_s = int(se["check_interval_seconds"])
         self.kb_threshold = int(se["knowledge_base_threshold"])
         self.quality_threshold = float(se["quality_score_threshold"])
         self.versions_dir = Path(se["versions_dir"])
         self.notifications_path = Path(se["notifications_path"])
         self.corpus_dir = Path(se["corpus_dir"])
-        self.db_path = Path(tr["queue_db"])
         self.active_link = Path("models/active")
 
     @classmethod
@@ -36,18 +34,7 @@ class SuccessorEngine:
         return p
 
     def log_feedback(self, user_id: str, score: float) -> None:
-        """Called from chat endpoint when user rates a response (1-5)."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS feedback "
-                "(id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                "user_id TEXT, score REAL, timestamp TEXT)"
-            )
-            conn.execute(
-                "INSERT INTO feedback (user_id, score, timestamp) "
-                "VALUES (?, ?, ?)",
-                (user_id, score, datetime.utcnow().isoformat()),
-            )
+        db.execute("INSERT INTO feedback (user_id, score) VALUES (%s, %s)", (user_id, score))
 
     def get_notifications(self) -> list[dict]:
         if not self.notifications_path.exists():
@@ -153,28 +140,20 @@ class SuccessorEngine:
         corpus_dir = self.corpus_dir / version
         corpus_dir.mkdir(parents=True, exist_ok=True)
         corpus_path = corpus_dir / "corpus.jsonl"
-        with sqlite3.connect(self.db_path) as conn:
-            try:
-                rows = conn.execute(
-                    "SELECT query, chunk_text FROM training_queue " "WHERE status='trained'"
-                ).fetchall()
-            except sqlite3.OperationalError:
-                logger.warning("training_queue table not found")
-                return None
+        try:
+            rows = db.fetchall("SELECT query, chunk_text FROM training_queue WHERE status='trained'")
+        except Exception as exc:
+            logger.warning("training_queue fetch failed: %s", exc)
+            return None
         if not rows:
             logger.warning("No trained chunks to export")
             return None
         with open(corpus_path, "w", encoding="utf-8") as f:
             for query, chunk_text in rows:
-                f.write(
-                    json.dumps(
-                        {
-                            "instruction": f"What do you know about: {query}",
-                            "response": chunk_text,
-                        }
-                    )
-                    + "\n"
-                )
+                f.write(json.dumps({
+                    "instruction": f"What do you know about: {query}",
+                    "response": chunk_text,
+                }) + "\n")
         logger.info("Exported %d chunks to %s", len(rows), corpus_path)
         return corpus_path
 
@@ -226,21 +205,19 @@ class SuccessorEngine:
 
     def _count_trained_chunks(self) -> int:
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                return conn.execute(
-                    "SELECT COUNT(*) FROM training_queue WHERE status='trained'"
-                ).fetchone()[0]
+            row = db.fetchone("SELECT COUNT(*) FROM training_queue WHERE status='trained'")
+            return int(row[0]) if row else 0
         except Exception:
             return 0
 
     def _rolling_quality_score(self) -> float:
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                row = conn.execute(
-                    "SELECT AVG(score) FROM "
-                    "(SELECT score FROM feedback "
-                    " ORDER BY id DESC LIMIT 100)"
-                ).fetchone()
+            row = db.fetchone("""
+                SELECT AVG(score) FROM (
+                    SELECT score FROM feedback
+                    ORDER BY id DESC LIMIT 100
+                ) sub
+                """)
             return float(row[0]) if row and row[0] is not None else 0.0
         except Exception:
             return 0.0
