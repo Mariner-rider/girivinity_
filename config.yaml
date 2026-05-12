@@ -18,17 +18,15 @@ model:
   n_ctx: 4096
   n_gpu_layers: 0
   architecture:
-    dim: 1024
-    n_layers: 16
-    n_heads: 16
-    n_kv_heads: 4
-    vocab_size: 32000
-    max_seq_len: 4096
-    ffn_multiplier: 2.667
-  quantisation:
-    input_model_path: "models/gguf/girivinity-f16.gguf"
-    output_model_path: "models/gguf/girivinity-q4_k_m.gguf"
-    quantization: "Q4_K_M"
+  dim: 3072
+  n_layers: 28
+  n_heads: 24
+  n_kv_heads: 8
+  vocab_size: 32000
+  max_seq_len: 4096
+  ffn_multiplier: 2.667
+  norm_eps: 0.00001
+  rope_theta: 500000.0
 
 rag:
   chroma_path: "data/chroma"
@@ -175,3 +173,39 @@ successor_engine:
   train_seq_len: 256
   eval_split: 0.1
   device: "cpu"
+
+
+skill_forge:
+  skills_dir: skills
+  db_path: data/skill_forge.db
+  min_chunks_to_generate: 3
+  max_skills_composed: 3
+
+
+cuda_engine:
+  nvcc_path: nvcc
+  cuda_std: c++17
+  arch: sm_80
+  max_compile_retries: 3
+  kernels_dir: data/cuda_kernels
+
+
+database:
+  host:     localhost
+  port:     5432
+  name:     girivinity
+  user:     girivinity_user
+  password: changeme
+  pool_min_conn: 2
+  pool_max_conn: 10
+
+
+domain_training:
+  data_dir: data/domain_training
+  target_tokens_per_domain: 5000000
+  finetune_epochs: 3
+  finetune_lr: 0.00005
+  finetune_batch_size: 2
+  grad_accum: 16
+  max_seq_len: 2048
+  output_dir: models/domain_finetuned

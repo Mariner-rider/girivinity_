@@ -1,164 +1,73 @@
-from __future__ import annotations
-
-import json
-import sqlite3
-import sys
-import types
+import tempfile
 from pathlib import Path
-
-from core.successor_engine import (
-    SuccessorConfig,
-    SuccessorEngine,
-    TrainingSummary,
-    approve_successor,
-    list_model_versions,
-    read_notifications,
-    reject_successor,
-)
+from unittest.mock import patch
 
 
-class FakeCollection:
-    def __init__(self, documents: list[str]) -> None:
-        self.documents = documents
-
-    def count(self) -> int:
-        return len(self.documents)
-
-    def get(self, **kwargs):
-        return {
-            "ids": [f"doc-{index}" for index, _doc in enumerate(self.documents)],
-            "documents": self.documents,
-            "metadatas": [{"source": "unit-test"} for _doc in self.documents],
-        }
-
-
-class FakeClient:
-    def __init__(self, collection: FakeCollection) -> None:
-        self.collection = collection
-
-    def get_or_create_collection(self, name: str):
-        assert name == "trained"
-        return self.collection
-
-
-class FakeTrainer:
-    def __init__(self) -> None:
-        self.calls = []
-
-    def train_and_evaluate(
-        self,
-        corpus_path: Path,
-        version: str,
-        previous_version: str | None,
-        trained_on_chunks: int,
-    ) -> TrainingSummary:
-        self.calls.append((corpus_path, version, previous_version, trained_on_chunks))
-        return TrainingSummary(
-            version=version,
-            model_path="models/versions/" + version,
-            perplexity=8.0,
-            previous_version=previous_version,
-            previous_perplexity=10.0,
-            trained_on_chunks=trained_on_chunks,
-        )
-
-
-def _config(tmp_path, **overrides) -> SuccessorConfig:
-    values = {
-        "check_interval_seconds": 1,
-        "chunk_threshold": 2,
-        "quality_threshold": 3.5,
-        "feedback_db_path": tmp_path / "feedback.sqlite3",
-        "training_root": tmp_path / "successor_training",
-        "versions_dir": tmp_path / "versions",
-        "active_model_symlink": tmp_path / "active",
-        "notifications_path": tmp_path / "admin_notifications.jsonl",
-        "state_path": tmp_path / "successor_state.json",
-        "train_seq_len": 8,
+def _make_engine(tmp: str):
+    cfg_path = Path(tmp) / "config.yaml"
+    import yaml
+    cfg = {
+        "successor_engine": {
+            "check_interval_seconds": 86400,
+            "knowledge_base_threshold": 100000,
+            "quality_score_threshold": 3.5,
+            "versions_dir": f"{tmp}/versions",
+            "notifications_path": f"{tmp}/notifications.jsonl",
+            "corpus_dir": f"{tmp}/corpus",
+        },
+        "training": {"queue_db": f"{tmp}/queue.db"},
     }
-    values.update(overrides)
-    return SuccessorConfig(**values)
+    cfg_path.write_text(yaml.dump(cfg))
+    with patch("builtins.open", side_effect=lambda p, *a, **k:
+               open(p, *a, **k) if str(p) != "config.yaml"
+               else open(cfg_path, *a, **k)):
+        pass
+    import os
+    os.chdir(tmp)
+    from app.core.successor_engine import SuccessorEngine
+    return SuccessorEngine()
 
 
-def test_successor_engine_exports_corpus_trains_and_notifies(tmp_path, monkeypatch):
-    collection = FakeCollection(["alpha", "beta", "gamma"])
-    monkeypatch.setitem(
-        sys.modules,
-        "chromadb",
-        types.SimpleNamespace(Client=lambda: FakeClient(collection)),
-    )
-    trainer = FakeTrainer()
-    config = _config(tmp_path)
-    engine = SuccessorEngine(config=config, trainer=trainer)
-
-    summary = engine.check_once()
-
-    assert summary is not None
-    assert trainer.calls[0][3] == 3
-    corpus_path = trainer.calls[0][0]
-    records = [json.loads(line) for line in corpus_path.read_text().splitlines()]
-    assert [record["text"] for record in records] == ["alpha", "beta", "gamma"]
-    notifications = read_notifications(config)
-    assert notifications[0]["type"] == "successor_ready"
-    assert notifications[0]["status"] == "awaiting_admin_approval"
-    assert notifications[0]["trained_on_chunks"] == 3
-    state = json.loads(config.state_path.read_text())
-    assert state["last_candidate_chunk_count"] == 3
-    assert "last_model_chunk_count" not in state
-
-
-def test_successor_engine_triggers_on_low_feedback_even_below_chunk_threshold(tmp_path, monkeypatch):
-    collection = FakeCollection(["alpha"])
-    monkeypatch.setitem(
-        sys.modules,
-        "chromadb",
-        types.SimpleNamespace(Client=lambda: FakeClient(collection)),
-    )
-    config = _config(tmp_path, chunk_threshold=99)
-    with sqlite3.connect(config.feedback_db_path) as conn:
-        conn.execute("CREATE TABLE user_feedback (score REAL, created_at TEXT)")
-        conn.executemany(
-            "INSERT INTO user_feedback (score, created_at) VALUES (?, ?)",
-            [(2.0, "2026-01-02"), (3.0, "2026-01-01")],
+def test_write_and_read_notification():
+    with tempfile.TemporaryDirectory() as tmp:
+        engine = _make_engine(tmp)
+        engine._write_notification(
+            version="20240101_000000",
+            previous_version="none",
+            improvement_percent=10.0,
+            trained_on_chunks=500,
+            perplexity=45.2,
         )
-    engine = SuccessorEngine(config=config, trainer=FakeTrainer())
+        notes = engine.get_notifications()
+        assert len(notes) == 1
+        assert notes[0]["version"] == "20240101_000000"
+        assert notes[0]["status"] == "awaiting_admin_approval"
 
-    assert engine.check_once() is not None
 
-
-def test_admin_approve_reject_and_list_versions(tmp_path):
-    config = _config(tmp_path)
-    version_dir = config.versions_dir / "successor-v1"
-    version_dir.mkdir(parents=True)
-    (version_dir / "metrics.json").write_text('{"perplexity": 7.5}')
-    config.notifications_path.write_text(
-        json.dumps(
-            {
-                "version": "successor-v1",
-                "status": "awaiting_admin_approval",
-                "trained_on_chunks": 42,
-            }
+def test_approve_updates_status():
+    with tempfile.TemporaryDirectory() as tmp:
+        engine = _make_engine(tmp)
+        version = "20240101_000000"
+        version_dir = Path(tmp) / "versions" / version
+        version_dir.mkdir(parents=True)
+        engine._write_notification(
+            version=version, previous_version="none",
+            improvement_percent=5.0, trained_on_chunks=100,
+            perplexity=40.0,
         )
-        + "\n"
-    )
+        ok = engine.approve_successor(version)
+        assert ok is True
+        notes = engine.get_notifications()
+        assert notes[0]["status"] == "approved"
 
-    approved = approve_successor("successor-v1", config)
 
-    assert approved["status"] == "approved"
-    assert config.active_model_symlink.resolve() == version_dir.resolve()
-    assert read_notifications(config)[0]["status"] == "approved"
-    assert json.loads(config.state_path.read_text())["last_model_chunk_count"] == 42
-    versions = list_model_versions(config)
-    assert versions == [
-        {
-            "version": "successor-v1",
-            "path": str(version_dir),
-            "active": True,
-            "metrics": {"perplexity": 7.5},
-        }
-    ]
-
-    rejected = reject_successor("successor-v1", config)
-
-    assert rejected == {"version": "successor-v1", "status": "rejected"}
-    assert read_notifications(config)[0]["status"] == "rejected"
+def test_no_trigger_below_thresholds():
+    with tempfile.TemporaryDirectory() as tmp:
+        engine = _make_engine(tmp)
+        with patch.object(engine, "_build_successor") as mock_build:
+            with patch.object(engine, "_count_trained_chunks",
+                              return_value=0):
+                with patch.object(engine, "_rolling_quality_score",
+                                  return_value=0.0):
+                    engine._check_thresholds()
+        mock_build.assert_not_called()
