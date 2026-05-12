@@ -98,87 +98,14 @@ class SelfTrainer:
             self._log_event(ts, len(rows), "success")
 
     def _run_lora_update(self, dataset_path: Path, version: str) -> bool:
-        if not self.base_model.exists():
-            logger.warning(
-                "Base model not found at %s — skipping. "
-                "Build it first with: python model/architecture.py",
-                self.base_model,
-            )
-            return False
-
+        """Delegate LoRA fine-tuning to the unified LoRATrainer."""
         try:
-            import torch
-            from datasets import Dataset
-            from peft import LoraConfig, PeftModel, TaskType, get_peft_model
-            from transformers import (
-                AutoModelForCausalLM,
-                AutoTokenizer,
-                DataCollatorForLanguageModeling,
-                Trainer,
-                TrainingArguments,
-            )
-
-            tokenizer = AutoTokenizer.from_pretrained(str(self.base_model))
-            model = AutoModelForCausalLM.from_pretrained(str(self.base_model), torch_dtype=torch.float32)
-
-            latest = self.adapters_dir / "latest"
-            if latest.exists() and latest.is_symlink():
-                model = PeftModel.from_pretrained(model, str(latest))
-            else:
-                model = get_peft_model(
-                    model,
-                    LoraConfig(
-                        r=16,
-                        lora_alpha=32,
-                        target_modules=["q_proj", "v_proj"],
-                        lora_dropout=0.05,
-                        task_type=TaskType.CAUSAL_LM,
-                    ),
-                )
-
-            records = []
-            with open(dataset_path, encoding="utf-8") as f:
-                for line in f:
-                    r = json.loads(line)
-                    records.append({"text": f"### Instruction:\n{r['instruction']}\n\n" f"### Response:\n{r['response']}"})
-
-            def tokenize(ex: dict) -> dict:
-                return tokenizer(ex["text"], truncation=True, max_length=1024, padding="max_length")
-
-            tokenized = Dataset.from_list(records).map(tokenize, batched=True, remove_columns=["text"])
-
-            adapter_out = self.adapters_dir / version
-            adapter_out.mkdir(parents=True, exist_ok=True)
-
-            result = Trainer(
-                model=model,
-                args=TrainingArguments(
-                    output_dir=str(adapter_out),
-                    num_train_epochs=self.epochs,
-                    per_device_train_batch_size=2,
-                    learning_rate=self.lr,
-                    logging_steps=10,
-                    save_strategy="no",
-                    report_to="none",
-                ),
-                train_dataset=tokenized,
-                data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
-            ).train()
-
-            if result.training_loss > self.loss_abort:
-                self._log_alert(version, result.training_loss)
-                return False
-
-            model.save_pretrained(str(adapter_out))
-            latest_link = self.adapters_dir / "latest"
-            if latest_link.is_symlink():
-                latest_link.unlink()
-            latest_link.symlink_to(adapter_out.resolve())
-            return True
-
+            from model.lora_trainer import LoRATrainer
+            return LoRATrainer().train(str(dataset_path), version)
         except Exception as exc:
-            logger.error("LoRA update failed: %s", exc)
+            logger.error("LoRATrainer failed: %s", exc)
             return False
+
 
     def _init_db(self) -> None:
         pass  # Tables created by migrations.py at startup

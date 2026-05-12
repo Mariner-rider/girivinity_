@@ -27,3 +27,9 @@ run:
 
 verify-3b:
 	pytest tests/test_architecture_3b.py -v
+
+lint:
+	ruff check app/ model/ llm_loader.py llm_engine.py
+
+test:
+	pytest -q

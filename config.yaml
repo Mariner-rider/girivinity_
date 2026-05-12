@@ -209,3 +209,37 @@ domain_training:
   grad_accum: 16
   max_seq_len: 2048
   output_dir: models/domain_finetuned
+
+architecture:
+  dim: 3072
+  n_layers: 28
+  n_heads: 24
+  n_kv_heads: 8
+  vocab_size: 32000
+  max_seq_len: 4096
+  ffn_multiplier: 2.667
+  norm_eps: 0.00001
+  rope_theta: 500000.0
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - v_proj
+    - k_proj
+    - o_proj
+  epochs: 3
+  learning_rate: 0.0002
+  batch_size: 2
+  grad_accum: 8
+  max_seq_len: 2048
+  adapters_dir: models/adapters
+  loss_abort_threshold: 2.0
+
+base_model:
+  model_key: girivinity-360m
+  load_in_4bit: false
+  hf_token: ""
+  cache_dir: models/hf_cache
