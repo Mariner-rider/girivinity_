@@ -1,100 +1,105 @@
 from __future__ import annotations
-
 import argparse
-import importlib
+import logging
+import shutil
 import subprocess
-from dataclasses import dataclass
+import sys
 from pathlib import Path
 
-import yaml
+import torch
+
+from model.architecture import GirivinityConfig, GirivinityModel
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
-@dataclass(slots=True)
-class QuantiseConfig:
-    input_model_path: Path = Path("models/gguf/girivinity-f16.gguf")
-    output_model_path: Path = Path("models/gguf/girivinity-q4_k_m.gguf")
-    quantization: str = "Q4_K_M"
+def export_to_gguf(
+    weights_path: str,
+    output_dir: str,
+    quant_type: str = "Q4_K_M",
+) -> Path:
+    weights = Path(weights_path)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    @classmethod
-    def from_yaml(cls, config_path: str | Path = "config.yaml") -> QuantiseConfig:
-        path = Path(config_path)
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
-        raw = raw or {}
-        section = (raw.get("model") or {}).get("quantisation") or raw.get("quantisation") or {}
-        return cls(
-            input_model_path=Path(section.get("input_model_path", "models/gguf/girivinity-f16.gguf")),
-            output_model_path=Path(section.get("output_model_path", "models/gguf/girivinity-q4_k_m.gguf")),
-            quantization=str(section.get("quantization", "Q4_K_M")),
+    cfg = GirivinityConfig.from_yaml()
+    model = GirivinityModel(cfg)
+    state = torch.load(weights / "model.pt", map_location="cpu")
+    model.load_state_dict(state)
+    model.eval()
+
+    hf_path = out_dir / "hf_export"
+    hf_path.mkdir(exist_ok=True)
+
+    try:
+        from safetensors.torch import save_file
+        save_file(model.state_dict(), hf_path / "model.safetensors")
+        logger.info("Weights exported to safetensors")
+    except ImportError:
+        torch.save(model.state_dict(), hf_path / "pytorch_model.bin")
+        logger.info("safetensors not available — saved as pytorch_model.bin")
+
+    hf_config = {
+        "architectures": ["GirivinityForCausalLM"],
+        "hidden_size": cfg.dim,
+        "num_hidden_layers": cfg.n_layers,
+        "num_attention_heads": cfg.n_heads,
+        "num_key_value_heads": cfg.n_kv_heads,
+        "intermediate_size": cfg.ffn_dim,
+        "vocab_size": cfg.vocab_size,
+        "max_position_embeddings": cfg.max_seq_len,
+        "rms_norm_eps": cfg.norm_eps,
+        "rope_theta": cfg.rope_theta,
+        "model_type": "girivinity",
+        "torch_dtype": "float32",
+    }
+    import json
+    (hf_path / "config.json").write_text(json.dumps(hf_config, indent=2))
+
+    tok_src = Path("models/tokeniser/tokeniser.json")
+    if tok_src.exists():
+        shutil.copy(tok_src, hf_path / "tokeniser.json")
+
+    gguf_path = out_dir / "model.gguf"
+    convert_script = Path("llama.cpp/convert_hf_to_gguf.py")
+
+    if not convert_script.exists():
+        logger.warning(
+            "llama.cpp not found at %s. "
+            "Clone it: git clone https://github.com/ggerganov/llama.cpp",
+            convert_script,
         )
-
-
-class GGUFQuantiser:
-    """Quantise a trained GGUF checkpoint with llama-cpp-python / llama.cpp Q4_K_M."""
-
-    def __init__(self, config: QuantiseConfig | None = None) -> None:
-        self.config = config or QuantiseConfig.from_yaml()
-
-    def quantise(self) -> Path:
-        self.config.output_model_path.parent.mkdir(parents=True, exist_ok=True)
-        llama_cpp = importlib.import_module("llama_cpp")
-        if self._has_python_quantize_api(llama_cpp):
-            self._quantise_with_python_bindings(llama_cpp)
-        else:
-            self._quantise_with_llama_cpp_binary(llama_cpp)
-        return self.config.output_model_path
-
-    def _has_python_quantize_api(self, llama_cpp) -> bool:
-        return all(
-            hasattr(llama_cpp, name)
-            for name in (
-                "llama_model_quantize",
-                "llama_model_quantize_default_params",
-                "LLAMA_FTYPE_MOSTLY_Q4_K_M",
-            )
+        logger.info(
+            "Manual conversion command when llama.cpp is available:\n"
+            "  python llama.cpp/convert_hf_to_gguf.py %s "
+            "--outfile %s --outtype %s",
+            hf_path, gguf_path, quant_type.lower(),
         )
+        return hf_path
 
-    def _quantise_with_python_bindings(self, llama_cpp) -> None:
-        params = llama_cpp.llama_model_quantize_default_params()
-        params.ftype = llama_cpp.LLAMA_FTYPE_MOSTLY_Q4_K_M
-        rc = llama_cpp.llama_model_quantize(
-            str(self.config.input_model_path).encode("utf-8"),
-            str(self.config.output_model_path).encode("utf-8"),
-            params,
-        )
-        if rc != 0:
-            raise RuntimeError(f"llama.cpp quantisation failed with status code {rc}")
+    result = subprocess.run(
+        [
+            sys.executable, str(convert_script),
+            str(hf_path),
+            "--outfile", str(gguf_path),
+            "--outtype", quant_type.lower(),
+        ],
+        capture_output=True, text=True,
+    )
 
-    def _quantise_with_llama_cpp_binary(self, llama_cpp) -> None:
-        package_dir = Path(llama_cpp.__file__).resolve().parent
-        candidates = [package_dir / "llama-quantize", package_dir / "bin" / "llama-quantize"]
-        quantize_binary = next((candidate for candidate in candidates if candidate.exists()), None)
-        if quantize_binary is None:
-            raise RuntimeError(
-                "llama.cpp quantise bindings/binary were not found in llama-cpp-python. "
-                "Install llama-cpp-python with llama.cpp quantisation support."
-            )
-        subprocess.run(
-            [
-                str(quantize_binary),
-                str(self.config.input_model_path),
-                str(self.config.output_model_path),
-                self.config.quantization,
-            ],
-            check=True,
-        )
+    if result.returncode != 0:
+        logger.error("GGUF conversion failed:\n%s", result.stderr)
+        raise RuntimeError("GGUF conversion failed")
 
-
-def quantise(config: QuantiseConfig | None = None) -> Path:
-    return GGUFQuantiser(config).quantise()
-
-
-def quantize(config: QuantiseConfig | None = None) -> Path:
-    return quantise(config)
+    logger.info("GGUF model saved to %s", gguf_path)
+    return gguf_path
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Quantise Girivinity model to GGUF Q4_K_M.")
-    parser.add_argument("--config", default="config.yaml")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--weights", default="models/base/final")
+    parser.add_argument("--output",  default="models/girivinity_quantised")
+    parser.add_argument("--quant",   default="Q4_K_M")
     args = parser.parse_args()
-    output = GGUFQuantiser(QuantiseConfig.from_yaml(args.config)).quantise()
-    print(output)
+    export_to_gguf(args.weights, args.output, args.quant)

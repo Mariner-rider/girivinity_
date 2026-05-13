@@ -1,43 +1,49 @@
 from __future__ import annotations
-
-import math
 from dataclasses import dataclass
-from pathlib import Path
-
+from typing import Optional
 import torch
-from torch import nn
+import torch.nn as nn
 import torch.nn.functional as F
-import yaml
 
 
-@dataclass(slots=True)
+@dataclass
 class GirivinityConfig:
-    dim: int = 1024
-    n_layers: int = 16
-    n_heads: int = 16
-    n_kv_heads: int = 4
+    # Girivinity 3B — ~2.92B parameters
+    dim: int = 3072
+    n_layers: int = 28
+    n_heads: int = 24
+    n_kv_heads: int = 8
     vocab_size: int = 32000
     max_seq_len: int = 4096
     ffn_multiplier: float = 2.667
     norm_eps: float = 1e-5
+    rope_theta: float = 500000.0   # Extended RoPE for longer context
 
     @property
     def head_dim(self) -> int:
-        if self.dim % self.n_heads != 0:
-            raise ValueError("dim must be divisible by n_heads")
-        return self.dim // self.n_heads
+        return self.dim // self.n_heads   # 128
+
+    @property
+    def ffn_dim(self) -> int:
+        # Round to nearest multiple of 256 for hardware efficiency
+        raw = int(self.dim * self.ffn_multiplier)
+        return (raw + 255) // 256 * 256  # 8192
 
     @classmethod
-    def from_yaml(cls, config_path: str | Path = "config.yaml") -> GirivinityConfig:
-        path = Path(config_path)
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
-        raw = raw or {}
-        model_section = raw.get("model") or {}
-        architecture = model_section.get("architecture") or raw.get("architecture") or {}
-        values = {**model_section, **architecture}
-        field_names = cls.__dataclass_fields__.keys()
-        kwargs = {name: values[name] for name in field_names if name in values}
-        return cls(**kwargs)
+    def from_yaml(cls, path: str = "config.yaml") -> "GirivinityConfig":
+        import yaml
+        from pathlib import Path
+        raw = yaml.safe_load(Path(path).read_text()).get("architecture", {})
+        return cls(**{k: v for k, v in raw.items()
+                     if k in cls.__dataclass_fields__})
+
+    @classmethod
+    def small(cls) -> "GirivinityConfig":
+        """360M config for edge/testing use."""
+        return cls(
+            dim=1024, n_layers=16, n_heads=16, n_kv_heads=4,
+            vocab_size=32000, max_seq_len=4096, ffn_multiplier=2.667,
+        )
 
 
 class RMSNorm(nn.Module):
@@ -47,205 +53,182 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return x * rms * self.weight
+        norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return norm * self.weight
 
 
-def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-    x_even = x[..., 0::2]
-    x_odd = x[..., 1::2]
-    return torch.stack((-x_odd, x_even), dim=-1).flatten(-2)
+def build_rope_cache(
+    seq_len: int, head_dim: int, theta: float, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    freqs = 1.0 / (
+        theta ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim)
+    )
+    t = torch.arange(seq_len, device=device).float()
+    freqs = torch.outer(t, freqs)
+    return torch.cos(freqs), torch.sin(freqs)
 
 
-class RotaryEmbedding(nn.Module):
-    def __init__(self, head_dim: int, max_seq_len: int, theta: float = 10000.0) -> None:
-        super().__init__()
-        if head_dim % 2 != 0:
-            raise ValueError("RoPE requires an even head dimension")
-        inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
-        positions = torch.arange(max_seq_len, dtype=torch.float)
-        freqs = torch.outer(positions, inv_freq)
-        emb = torch.repeat_interleave(freqs, repeats=2, dim=-1)
-        self.register_buffer("cos", emb.cos(), persistent=False)
-        self.register_buffer("sin", emb.sin(), persistent=False)
-
-    def forward(self, x: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
-        seq_len = x.size(1)
-        cos = self.cos[start_pos : start_pos + seq_len].to(device=x.device, dtype=x.dtype)
-        sin = self.sin[start_pos : start_pos + seq_len].to(device=x.device, dtype=x.dtype)
-        cos = cos.view(1, seq_len, 1, -1)
-        sin = sin.view(1, seq_len, 1, -1)
-        return (x * cos) + (_rotate_half(x) * sin)
+def apply_rope(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    B, H, T, D = x.shape
+    x1, x2 = x[..., ::2], x[..., 1::2]
+    cos = cos[:T, :D // 2].unsqueeze(0).unsqueeze(0)
+    sin = sin[:T, :D // 2].unsqueeze(0).unsqueeze(0)
+    rotated = torch.cat([-x2, x1], dim=-1)
+    return x * cos + rotated * sin
 
 
 class GroupedQueryAttention(nn.Module):
-    def __init__(self, config: GirivinityConfig) -> None:
+    def __init__(self, cfg: GirivinityConfig) -> None:
         super().__init__()
-        if config.n_heads % config.n_kv_heads != 0:
-            raise ValueError("n_heads must be divisible by n_kv_heads for grouped query attention")
-        self.n_heads = config.n_heads
-        self.n_kv_heads = config.n_kv_heads
-        self.head_dim = config.head_dim
-        self.n_rep = config.n_heads // config.n_kv_heads
-        self.wq = nn.Linear(config.dim, config.n_heads * self.head_dim, bias=False)
-        self.wk = nn.Linear(config.dim, config.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(config.dim, config.n_kv_heads * self.head_dim, bias=False)
-        self.wo = nn.Linear(config.n_heads * self.head_dim, config.dim, bias=False)
+        self.n_heads    = cfg.n_heads
+        self.n_kv_heads = cfg.n_kv_heads
+        self.head_dim   = cfg.head_dim
+        self.scale      = self.head_dim ** -0.5
+        self.n_rep      = self.n_heads // self.n_kv_heads
+
+        self.q_proj = nn.Linear(cfg.dim, cfg.n_heads * cfg.head_dim, bias=False)
+        self.k_proj = nn.Linear(cfg.dim, cfg.n_kv_heads * cfg.head_dim, bias=False)
+        self.v_proj = nn.Linear(cfg.dim, cfg.n_kv_heads * cfg.head_dim, bias=False)
+        self.o_proj = nn.Linear(cfg.n_heads * cfg.head_dim, cfg.dim, bias=False)
 
     def forward(
         self,
         x: torch.Tensor,
-        rope: RotaryEmbedding,
-        *,
-        start_pos: int = 0,
-        cache: dict[str, torch.Tensor] | None = None,
-    ) -> torch.Tensor:
-        batch_size, seq_len, _ = x.shape
-        q = self.wq(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
-        k = self.wk(x).view(batch_size, seq_len, self.n_kv_heads, self.head_dim)
-        v = self.wv(x).view(batch_size, seq_len, self.n_kv_heads, self.head_dim)
-        q = rope(q, start_pos=start_pos)
-        k = rope(k, start_pos=start_pos)
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        kv_cache: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        B, T, _ = x.shape
 
-        if cache is not None:
-            end_pos = start_pos + seq_len
-            if "k" not in cache or cache["k"].size(0) != batch_size:
-                max_seq_len = rope.cos.size(0)
-                cache["k"] = torch.zeros(
-                    batch_size,
-                    max_seq_len,
-                    self.n_kv_heads,
-                    self.head_dim,
-                    device=x.device,
-                    dtype=k.dtype,
-                )
-                cache["v"] = torch.zeros_like(cache["k"])
-            cache["k"][:, start_pos:end_pos] = k
-            cache["v"][:, start_pos:end_pos] = v
-            k = cache["k"][:, :end_pos]
-            v = cache["v"][:, :end_pos]
+        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
-        if self.n_rep > 1:
-            k = k.repeat_interleave(self.n_rep, dim=2)
-            v = v.repeat_interleave(self.n_rep, dim=2)
+        q = apply_rope(q, cos, sin)
+        k = apply_rope(k, cos, sin)
 
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        scores = scores + self._causal_mask(seq_len, k.size(-2), start_pos, x.device, scores.dtype)
-        weights = F.softmax(scores.float(), dim=-1).to(dtype=q.dtype)
-        out = torch.matmul(weights, v).transpose(1, 2).contiguous()
-        out = out.view(batch_size, seq_len, self.n_heads * self.head_dim)
-        return self.wo(out)
+        if kv_cache is not None:
+            k_cache, v_cache = kv_cache
+            k = torch.cat([k_cache, k], dim=2)
+            v = torch.cat([v_cache, v], dim=2)
 
-    def _causal_mask(
-        self,
-        seq_len: int,
-        key_len: int,
-        start_pos: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        query_positions = torch.arange(start_pos, start_pos + seq_len, device=device).view(seq_len, 1)
-        key_positions = torch.arange(key_len, device=device).view(1, key_len)
-        mask = torch.zeros(seq_len, key_len, device=device, dtype=dtype)
-        mask = mask.masked_fill(key_positions > query_positions, torch.finfo(dtype).min)
-        return mask.view(1, 1, seq_len, key_len)
+        new_cache = (k, v)
+
+        # Expand KV heads to match Q heads
+        k = k.repeat_interleave(self.n_rep, dim=1)
+        v = v.repeat_interleave(self.n_rep, dim=1)
+
+        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        if mask is not None:
+            attn = attn + mask
+        attn = F.softmax(attn.float(), dim=-1).to(q.dtype)
+
+        out = torch.matmul(attn, v)
+        out = out.transpose(1, 2).contiguous().view(B, T, -1)
+        return self.o_proj(out), new_cache
 
 
-class SwiGLUFeedForward(nn.Module):
-    def __init__(self, config: GirivinityConfig) -> None:
+class SwiGLU(nn.Module):
+    def __init__(self, cfg: GirivinityConfig) -> None:
         super().__init__()
-        hidden_dim = int(config.ffn_multiplier * config.dim)
-        hidden_dim = ((hidden_dim + 255) // 256) * 256
-        self.w1 = nn.Linear(config.dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, config.dim, bias=False)
-        self.w3 = nn.Linear(config.dim, hidden_dim, bias=False)
+        self.gate = nn.Linear(cfg.dim, cfg.ffn_dim, bias=False)
+        self.up   = nn.Linear(cfg.dim, cfg.ffn_dim, bias=False)
+        self.down = nn.Linear(cfg.ffn_dim, cfg.dim, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        return self.down(F.silu(self.gate(x)) * self.up(x))
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, config: GirivinityConfig) -> None:
+    def __init__(self, cfg: GirivinityConfig) -> None:
         super().__init__()
-        self.attention_norm = RMSNorm(config.dim, eps=config.norm_eps)
-        self.attention = GroupedQueryAttention(config)
-        self.ffn_norm = RMSNorm(config.dim, eps=config.norm_eps)
-        self.feed_forward = SwiGLUFeedForward(config)
+        self.attn_norm = RMSNorm(cfg.dim, cfg.norm_eps)
+        self.ffn_norm  = RMSNorm(cfg.dim, cfg.norm_eps)
+        self.attn = GroupedQueryAttention(cfg)
+        self.ffn  = SwiGLU(cfg)
 
     def forward(
         self,
         x: torch.Tensor,
-        rope: RotaryEmbedding,
-        *,
-        start_pos: int = 0,
-        cache: dict[str, torch.Tensor] | None = None,
-    ) -> torch.Tensor:
-        x = x + self.attention(self.attention_norm(x), rope, start_pos=start_pos, cache=cache)
-        x = x + self.feed_forward(self.ffn_norm(x))
-        return x
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        kv_cache: Optional[tuple] = None,
+    ) -> tuple[torch.Tensor, tuple]:
+        attn_out, new_cache = self.attn(
+            self.attn_norm(x), cos, sin, mask, kv_cache
+        )
+        x = x + attn_out
+        x = x + self.ffn(self.ffn_norm(x))
+        return x, new_cache
 
 
 class GirivinityModel(nn.Module):
-    """Decoder-only transformer with RoPE, GQA, KV cache, RMSNorm, and SwiGLU."""
-
-    def __init__(self, config: GirivinityConfig | None = None) -> None:
+    def __init__(self, cfg: GirivinityConfig) -> None:
         super().__init__()
-        self.config = config or GirivinityConfig.from_yaml()
-        self.token_embeddings = nn.Embedding(self.config.vocab_size, self.config.dim)
-        self.rope = RotaryEmbedding(self.config.head_dim, self.config.max_seq_len)
-        self.layers = nn.ModuleList([DecoderBlock(self.config) for _ in range(self.config.n_layers)])
-        self.norm = RMSNorm(self.config.dim, eps=self.config.norm_eps)
-        self.output = nn.Linear(self.config.dim, self.config.vocab_size, bias=False)
-        self.output.weight = self.token_embeddings.weight
+        self.cfg     = cfg
+        self.embed   = nn.Embedding(cfg.vocab_size, cfg.dim)
+        self.layers  = nn.ModuleList([DecoderBlock(cfg) for _ in range(cfg.n_layers)])
+        self.norm    = RMSNorm(cfg.dim, cfg.norm_eps)
+        self.lm_head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
+        self.lm_head.weight = self.embed.weight  # weight tying
 
-    @classmethod
-    def from_yaml(cls, config_path: str | Path = "config.yaml") -> GirivinityModel:
-        return cls(GirivinityConfig.from_yaml(config_path))
+        cos, sin = build_rope_cache(
+            cfg.max_seq_len, cfg.head_dim, cfg.rope_theta, torch.device("cpu")
+        )
+        self.register_buffer("rope_cos", cos)
+        self.register_buffer("rope_sin", sin)
 
-    def init_kv_cache(self, batch_size: int, device: torch.device | str | None = None) -> list[dict[str, torch.Tensor]]:
-        parameter = next(self.parameters())
-        device = device or parameter.device
-        dtype = parameter.dtype
-        return [
-            {
-                "k": torch.zeros(
-                    batch_size,
-                    self.config.max_seq_len,
-                    self.config.n_kv_heads,
-                    self.config.head_dim,
-                    device=device,
-                    dtype=dtype,
-                ),
-                "v": torch.zeros(
-                    batch_size,
-                    self.config.max_seq_len,
-                    self.config.n_kv_heads,
-                    self.config.head_dim,
-                    device=device,
-                    dtype=dtype,
-                ),
-            }
-            for _ in self.layers
-        ]
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module: nn.Module) -> None:
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(
         self,
         input_ids: torch.Tensor,
-        *,
-        start_pos: int = 0,
-        kv_cache: list[dict[str, torch.Tensor]] | None = None,
-    ) -> torch.Tensor:
-        if input_ids.ndim != 2:
-            raise ValueError("input_ids must have shape [batch, seq]")
-        if start_pos + input_ids.size(1) > self.config.max_seq_len:
-            raise ValueError("sequence exceeds configured max_seq_len")
+        kv_caches: Optional[list[tuple]] = None,
+    ) -> tuple[torch.Tensor, list[tuple]]:
+        B, T = input_ids.shape
+        x = self.embed(input_ids)
 
-        x = self.token_embeddings(input_ids)
-        for index, layer in enumerate(self.layers):
-            cache = kv_cache[index] if kv_cache is not None else None
-            x = layer(x, self.rope, start_pos=start_pos, cache=cache)
-        x = self.norm(x)
-        return self.output(x)
+        cos = self.rope_cos[:T].to(x.device)
+        sin = self.rope_sin[:T].to(x.device)
+
+        causal_mask = torch.full(
+            (T, T), float("-inf"), device=x.device
+        ).triu(1).unsqueeze(0).unsqueeze(0)
+
+        new_caches = []
+        for i, layer in enumerate(self.layers):
+            cache = kv_caches[i] if kv_caches else None
+            x, new_cache = layer(x, cos, sin, causal_mask, cache)
+            new_caches.append(new_cache)
+
+        logits = self.lm_head(self.norm(x))
+        return logits, new_caches
+
+    def param_count(self) -> str:
+        n = sum(p.numel() for p in self.parameters())
+        return f"{n / 1e6:.1f}M parameters"
+
+    def param_count_detailed(self) -> dict:
+        embed = sum(p.numel() for p in self.embed.parameters())
+        layers = sum(p.numel() for p in self.layers.parameters())
+        norm = sum(p.numel() for p in self.norm.parameters())
+        total = sum(p.numel() for p in self.parameters())
+        return {
+            "total": f"{total/1e9:.3f}B",
+            "embedding": f"{embed/1e6:.1f}M",
+            "layers": f"{layers/1e9:.3f}B",
+            "norm": f"{norm/1e3:.1f}K",
+            "per_layer": f"{layers/self.cfg.n_layers/1e6:.1f}M",
+        }
