@@ -29,10 +29,6 @@ class GirivinityConfig:
         raw = int(self.dim * self.ffn_multiplier)
         return (raw + 255) // 256 * 256  # 8192
 
-    @property
-    def ffn_dim(self) -> int:
-        return int(self.dim * self.ffn_multiplier)
-
     @classmethod
     def from_yaml(cls, path: str = "config.yaml") -> "GirivinityConfig":
         import yaml

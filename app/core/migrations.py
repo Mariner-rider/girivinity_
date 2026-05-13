@@ -66,6 +66,25 @@ MIGRATIONS: list[str] = [
     CREATE INDEX IF NOT EXISTS idx_skill_interactions_slug
     ON skill_interactions (skill_slug)
 """,
+"""
+    CREATE TABLE IF NOT EXISTS sentiment_history (
+        id              BIGSERIAL PRIMARY KEY,
+        user_id         TEXT        NOT NULL,
+        query_hash      TEXT        NOT NULL,
+        emotion         TEXT        NOT NULL,
+        intensity       REAL        DEFAULT 0.0,
+        tone            TEXT        DEFAULT 'neutral',
+        language_mix    TEXT        DEFAULT 'english',
+        urgency         REAL        DEFAULT 0.0,
+        expertise_signal TEXT       DEFAULT 'intermediate',
+        response_style  TEXT        DEFAULT 'balanced',
+        timestamp       TIMESTAMPTZ DEFAULT NOW()
+    )
+""",
+"""
+    CREATE INDEX IF NOT EXISTS idx_sentiment_user
+    ON sentiment_history (user_id)
+""",
 ]
 
 

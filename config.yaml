@@ -243,3 +243,19 @@ base_model:
   load_in_4bit: false
   hf_token: ""
   cache_dir: models/hf_cache
+
+cognitive_engine:
+  max_sub_problems: 4
+  confidence_threshold: 0.6
+  verbose_reasoning: false
+
+sentiment_engine:
+  store_history: true
+
+social_engine:
+  profiles_dir: data/user_profiles
+
+memory_engine:
+  max_memories_per_user: 1000
+  recall_top_k: 5
+  importance_threshold: 0.3
