@@ -259,3 +259,10 @@ memory_engine:
   max_memories_per_user: 1000
   recall_top_k: 5
   importance_threshold: 0.3
+
+cyber_shield:
+  observe_threshold:  0.3
+  guard_threshold:    0.6
+  contain_threshold:  0.9
+  emergency_auto:     true
+  log_clean_requests: false
