@@ -20,6 +20,8 @@ from app.api.routes.chat import router as chat_router
 from app.api.routes.health import router as health_router
 from app.api.routes.skills import router as skills_router
 from app.api.routes.cuda import router as cuda_router
+from app.security.cyber_shield import CyberShieldMiddleware
+from app.api.routes.security import router as security_router
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +42,13 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Girivinity", lifespan=lifespan)
+app.add_middleware(CyberShieldMiddleware)
 app.include_router(chat_router)
 app.include_router(health_router)
 app.include_router(admin_router)
 app.include_router(skills_router)
 app.include_router(cuda_router)
+app.include_router(security_router)
 
 
 def _start_self_trainer_once() -> None:

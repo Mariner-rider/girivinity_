@@ -85,6 +85,71 @@ MIGRATIONS: list[str] = [
     CREATE INDEX IF NOT EXISTS idx_sentiment_user
     ON sentiment_history (user_id)
 """,
+"""
+    CREATE TABLE IF NOT EXISTS security_events (
+        id          BIGSERIAL PRIMARY KEY,
+        user_id     TEXT        DEFAULT 'anonymous',
+        ip_address  TEXT        NOT NULL,
+        endpoint    TEXT        DEFAULT '',
+        event_type  TEXT        NOT NULL,
+        threat_type TEXT        DEFAULT 'clean',
+        severity    TEXT        DEFAULT 'none',
+        detail      TEXT        DEFAULT '',
+        blocked     BOOLEAN     DEFAULT FALSE,
+        hour_of_day INTEGER,
+        timestamp   TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+
+    """
+    CREATE INDEX IF NOT EXISTS idx_security_events_user
+    ON security_events (user_id, timestamp DESC)
+    """,
+
+    """
+    CREATE INDEX IF NOT EXISTS idx_security_events_ip
+    ON security_events (ip_address, timestamp DESC)
+    """,
+
+    """
+    CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+        id           BIGSERIAL PRIMARY KEY,
+        bucket_key   TEXT        NOT NULL,
+        request_time TIMESTAMPTZ NOT NULL
+    )
+    """,
+
+    """
+    CREATE INDEX IF NOT EXISTS idx_rate_limit_key_time
+    ON rate_limit_buckets (bucket_key, request_time DESC)
+    """,
+
+    """
+    CREATE TABLE IF NOT EXISTS active_sessions (
+        id          BIGSERIAL PRIMARY KEY,
+        token       TEXT        UNIQUE NOT NULL,
+        user_id     TEXT        NOT NULL,
+        ip_address  TEXT        DEFAULT '',
+        api_key     TEXT        DEFAULT '',
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        expires_at  TIMESTAMPTZ NOT NULL,
+        valid       BOOLEAN     DEFAULT TRUE
+    )
+    """,
+
+    """
+    CREATE INDEX IF NOT EXISTS idx_active_sessions_token
+    ON active_sessions (token) WHERE valid = TRUE
+    """,
+
+    """
+    CREATE TABLE IF NOT EXISTS system_security_mode (
+        id           BIGSERIAL PRIMARY KEY,
+        mode         TEXT        NOT NULL DEFAULT 'observe',
+        triggered_by TEXT        DEFAULT 'system',
+        set_at       TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
 ]
 
 
