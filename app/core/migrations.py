@@ -150,6 +150,39 @@ MIGRATIONS: list[str] = [
         set_at       TIMESTAMPTZ DEFAULT NOW()
     )
     """,
+
+    """
+    CREATE TABLE IF NOT EXISTS blacklisted_urls (
+        id             BIGSERIAL PRIMARY KEY,
+        url            TEXT        NOT NULL,
+        url_hash       TEXT        UNIQUE NOT NULL,
+        reason         TEXT        DEFAULT '',
+        blacklisted_at TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+
+    """
+    CREATE INDEX IF NOT EXISTS idx_blacklisted_url_hash
+    ON blacklisted_urls (url_hash)
+    """,
+
+    """
+    CREATE TABLE IF NOT EXISTS tenant_security_configs (
+        id                      BIGSERIAL PRIMARY KEY,
+        api_key                 TEXT        UNIQUE NOT NULL,
+        observe_threshold       REAL        DEFAULT 0.3,
+        guard_threshold         REAL        DEFAULT 0.6,
+        contain_threshold       REAL        DEFAULT 0.9,
+        rate_limit_rpm          INTEGER     DEFAULT 500,
+        block_prompt_injection  BOOLEAN     DEFAULT TRUE,
+        block_sql_injection     BOOLEAN     DEFAULT TRUE,
+        block_xss               BOOLEAN     DEFAULT TRUE,
+        block_ssrf              BOOLEAN     DEFAULT TRUE,
+        alert_email             TEXT        DEFAULT '',
+        custom_blocked_patterns JSONB       DEFAULT '[]',
+        updated_at              TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
 ]
 
 

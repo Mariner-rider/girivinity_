@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,14 +14,18 @@ class AnomalyResult:
 
 
 class AnomalyScorer:
-    def score(self, user_id: str, ip: str, query: str, endpoint: str) -> AnomalyResult:
-        _ = query
-        signals = []
+    def score(
+        self,
+        user_id: str,
+        ip: str,
+        query: str,
+        endpoint: str,
+    ) -> AnomalyResult:
+        signals: list[str] = []
         score = 0.0
 
         try:
             from app.core import db
-
             rows = db.fetchall(
                 """
                 SELECT ip_address, endpoint, hour_of_day
@@ -33,11 +36,10 @@ class AnomalyScorer:
                 """,
                 (user_id,),
             )
-
             if rows:
-                known_ips = {r[0] for r in rows}
+                known_ips       = {r[0] for r in rows}
                 known_endpoints = {r[1] for r in rows}
-                usual_hours = [r[2] for r in rows if r[2] is not None]
+                usual_hours     = [r[2] for r in rows if r[2] is not None]
 
                 if ip and ip not in known_ips:
                     score += 0.3
@@ -47,9 +49,9 @@ class AnomalyScorer:
                     score += 0.15
                     signals.append(f"new_endpoint:{endpoint}")
 
-                current_hour = datetime.now(timezone.utc).hour
                 if usual_hours:
-                    avg_hour = sum(usual_hours) / len(usual_hours)
+                    current_hour = datetime.now(timezone.utc).hour
+                    avg_hour     = sum(usual_hours) / len(usual_hours)
                     if abs(current_hour - avg_hour) > 8:
                         score += 0.2
                         signals.append(f"unusual_hour:{current_hour}")
@@ -61,9 +63,11 @@ class AnomalyScorer:
                      event_type, hour_of_day, timestamp)
                 VALUES (%s, %s, %s, 'request', %s, NOW())
                 """,
-                (user_id, ip, endpoint, datetime.now(timezone.utc).hour),
+                (
+                    user_id, ip, endpoint,
+                    datetime.now(timezone.utc).hour,
+                ),
             )
-
         except Exception as exc:
             logger.warning("AnomalyScorer error: %s", exc)
 

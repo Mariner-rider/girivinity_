@@ -12,6 +12,8 @@ from app.core.cognitive_engine import CognitiveEngine
 from app.core.sentiment_engine import SentimentEngine
 from app.core.social_engine import SocialEngine
 from app.core.memory_engine import MemoryEngine
+from app.security.ai_threat_reasoner import AIThreatReasoner
+from app.security.jailbreak_classifier import JailbreakClassifier
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -34,6 +36,22 @@ class ChatResponse(BaseModel):
 async def chat_message(req: ChatRequest):
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+    # AI-powered threat check on query
+    reasoner  = AIThreatReasoner()
+    jailbreak = JailbreakClassifier()
+
+    ai_threat = reasoner.assess(
+        query=req.query,
+        user_id=req.user_id,
+    )
+    jb_result = jailbreak.classify(req.query)
+
+    if ai_threat.recommended_action == "block" or jb_result.is_jailbreak:
+        raise HTTPException(
+            status_code=400,
+            detail="Request could not be processed",
+        )
 
     # 1 — Analyse sentiment (silent)
     sentiment = SentimentEngine().analyse(req.query, req.user_id)
@@ -118,6 +136,22 @@ async def chat_message_stream(req: ChatRequest):
     """Streaming version — yields answer tokens as they are built."""
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+    # AI-powered threat check on query
+    reasoner  = AIThreatReasoner()
+    jailbreak = JailbreakClassifier()
+
+    ai_threat = reasoner.assess(
+        query=req.query,
+        user_id=req.user_id,
+    )
+    jb_result = jailbreak.classify(req.query)
+
+    if ai_threat.recommended_action == "block" or jb_result.is_jailbreak:
+        raise HTTPException(
+            status_code=400,
+            detail="Request could not be processed",
+        )
 
     try:
         result = QueryRouter().route(req.query)

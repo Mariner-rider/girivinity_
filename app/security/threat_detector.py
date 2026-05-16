@@ -1,7 +1,6 @@
 from __future__ import annotations
-
-import logging
 import re
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -9,14 +8,14 @@ logger = logging.getLogger(__name__)
 
 
 class ThreatType(str, Enum):
-    SQL_INJECTION = "sql_injection"
+    SQL_INJECTION    = "sql_injection"
     PROMPT_INJECTION = "prompt_injection"
-    XSS = "xss"
-    SSRF = "ssrf"
-    PATH_TRAVERSAL = "path_traversal"
-    BRUTE_FORCE = "brute_force"
-    ANOMALY = "anomaly"
-    CLEAN = "clean"
+    XSS              = "xss"
+    SSRF             = "ssrf"
+    PATH_TRAVERSAL   = "path_traversal"
+    BRUTE_FORCE      = "brute_force"
+    ANOMALY          = "anomaly"
+    CLEAN            = "clean"
 
 
 @dataclass
@@ -116,7 +115,6 @@ class ThreatDetector:
         headers: dict | None = None,
         user_agent: str = "",
     ) -> ThreatResult:
-        _ = user_agent
         results = [
             self._scan_sql_injection(query),
             self._scan_prompt_injection(query),
@@ -125,16 +123,18 @@ class ThreatDetector:
             self._scan_path_traversal(url_path),
             self._scan_headers(headers or {}),
         ]
-        for threat_type in [
+        priority = [
+            ThreatType.SSRF,
             ThreatType.SQL_INJECTION,
+            ThreatType.PATH_TRAVERSAL,
             ThreatType.PROMPT_INJECTION,
             ThreatType.XSS,
-            ThreatType.SSRF,
-            ThreatType.PATH_TRAVERSAL,
-        ]:
-            for result in results:
-                if result.threat_type == threat_type and result.score > 0:
-                    return result
+            ThreatType.ANOMALY,
+        ]
+        for threat_type in priority:
+            for r in results:
+                if r.threat_type == threat_type and r.score > 0:
+                    return r
         return ThreatResult(
             threat_type=ThreatType.CLEAN,
             severity="none",
@@ -144,57 +144,48 @@ class ThreatDetector:
 
     def _scan_sql_injection(self, text: str) -> ThreatResult:
         return self._pattern_scan(
-            text.upper(),
-            SQL_INJECTION_PATTERNS,
-            ThreatType.SQL_INJECTION,
-            "high",
+            text.upper(), SQL_INJECTION_PATTERNS,
+            ThreatType.SQL_INJECTION, "high",
             "SQL injection attempt blocked",
         )
 
     def _scan_prompt_injection(self, text: str) -> ThreatResult:
         return self._pattern_scan(
-            text.lower(),
-            PROMPT_INJECTION_PATTERNS,
-            ThreatType.PROMPT_INJECTION,
-            "high",
+            text.lower(), PROMPT_INJECTION_PATTERNS,
+            ThreatType.PROMPT_INJECTION, "high",
             "Prompt injection attempt blocked",
         )
 
     def _scan_xss(self, text: str) -> ThreatResult:
         return self._pattern_scan(
-            text.lower(),
-            XSS_PATTERNS,
-            ThreatType.XSS,
-            "medium",
+            text.lower(), XSS_PATTERNS,
+            ThreatType.XSS, "medium",
             "XSS attempt blocked",
         )
 
     def _scan_ssrf(self, text: str) -> ThreatResult:
         return self._pattern_scan(
-            text.lower(),
-            SSRF_PATTERNS,
-            ThreatType.SSRF,
-            "critical",
+            text.lower(), SSRF_PATTERNS,
+            ThreatType.SSRF, "critical",
             "SSRF attempt blocked",
         )
 
     def _scan_path_traversal(self, path: str) -> ThreatResult:
         return self._pattern_scan(
-            path.lower(),
-            PATH_TRAVERSAL_PATTERNS,
-            ThreatType.PATH_TRAVERSAL,
-            "high",
+            path.lower(), PATH_TRAVERSAL_PATTERNS,
+            ThreatType.PATH_TRAVERSAL, "high",
             "Path traversal attempt blocked",
         )
 
     def _scan_headers(self, headers: dict) -> ThreatResult:
         suspicious = [
-            "x-forwarded-host",
-            "x-original-url",
-            "x-rewrite-url",
-            "x-override-url",
+            "x-forwarded-host", "x-original-url",
+            "x-rewrite-url", "x-override-url",
         ]
-        matched = [h for h in suspicious if h in {k.lower() for k in headers}]
+        matched = [
+            h for h in suspicious
+            if h in {k.lower() for k in headers}
+        ]
         if matched:
             return ThreatResult(
                 threat_type=ThreatType.ANOMALY,

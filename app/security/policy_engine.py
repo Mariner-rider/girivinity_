@@ -1,19 +1,17 @@
 from __future__ import annotations
-
 import logging
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-
 import yaml
 
 logger = logging.getLogger(__name__)
 
 
 class SecurityMode(str, Enum):
-    OBSERVE = "observe"
-    GUARD = "guard"
-    CONTAIN = "contain"
+    OBSERVE   = "observe"
+    GUARD     = "guard"
+    CONTAIN   = "contain"
     EMERGENCY = "emergency"
 
 
@@ -30,10 +28,10 @@ class PolicyDecision:
 class PolicyEngine:
     def __init__(self) -> None:
         cfg = yaml.safe_load(Path("config.yaml").read_text())
-        se = cfg.get("cyber_shield", {})
-        self.observe_threshold = float(se.get("observe_threshold", 0.3))
-        self.guard_threshold = float(se.get("guard_threshold", 0.6))
-        self.contain_threshold = float(se.get("contain_threshold", 0.9))
+        se  = cfg.get("cyber_shield", {})
+        self.observe_threshold  = float(se.get("observe_threshold",  0.3))
+        self.guard_threshold    = float(se.get("guard_threshold",    0.6))
+        self.contain_threshold  = float(se.get("contain_threshold",  0.9))
         self.current_mode = self._get_system_mode()
 
     def decide(
@@ -71,7 +69,7 @@ class PolicyEngine:
             return PolicyDecision(
                 mode=SecurityMode.CONTAIN,
                 action="block_session",
-                reason=f"High combined risk score: {combined:.2f}",
+                reason=f"High combined risk: {combined:.2f}",
                 block_request=True,
                 log_event=True,
                 alert_admin=True,
@@ -80,7 +78,7 @@ class PolicyEngine:
             return PolicyDecision(
                 mode=SecurityMode.GUARD,
                 action="throttle_and_warn",
-                reason=f"Elevated risk score: {combined:.2f}",
+                reason=f"Elevated risk: {combined:.2f}",
                 block_request=rate_limited,
                 log_event=True,
                 alert_admin=False,
@@ -97,26 +95,28 @@ class PolicyEngine:
     def _get_system_mode(self) -> SecurityMode:
         try:
             from app.core import db
-
-            row = db.fetchone("SELECT mode FROM system_security_mode ORDER BY set_at DESC LIMIT 1")
+            row = db.fetchone(
+                "SELECT mode FROM system_security_mode "
+                "ORDER BY set_at DESC LIMIT 1"
+            )
             if row:
                 return SecurityMode(row[0])
         except Exception:
             pass
         return SecurityMode.OBSERVE
 
-    def _escalate_mode(self, mode: SecurityMode, triggered_by: str) -> None:
+    def _escalate_mode(
+        self, mode: SecurityMode, triggered_by: str
+    ) -> None:
         try:
             from app.core import db
-
             db.execute(
-                """
-                INSERT INTO system_security_mode
-                    (mode, triggered_by, set_at)
-                VALUES (%s, %s, NOW())
-                """,
+                "INSERT INTO system_security_mode "
+                "(mode, triggered_by, set_at) VALUES (%s, %s, NOW())",
                 (mode.value, triggered_by),
             )
-            logger.critical("SECURITY MODE ESCALATED TO %s by %s", mode.value, triggered_by)
+            logger.critical(
+                "MODE ESCALATED TO %s by %s", mode.value, triggered_by
+            )
         except Exception as exc:
             logger.error("Mode escalation failed: %s", exc)
