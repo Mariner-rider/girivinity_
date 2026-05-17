@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-import yaml
-
 logger = logging.getLogger(__name__)
 
 
@@ -73,6 +71,8 @@ class DataQualityScorer:
             + signals["academic_signal"] * 0.05
         )
         score = round(min(1.0, score), 4)
+        if length < 20 and boilerplate_hits >= 2:
+            score = min(score, 0.39)
 
         tier = (
             "gold" if score >= 0.8 else
@@ -116,6 +116,8 @@ class Deduplicator:
 
     def _shingle_hash(self, text: str, k: int = 5) -> str:
         words = text.lower().split()
+        if len(words) < k:
+            return hashlib.md5(" ".join(words).encode()).hexdigest()
         shingles = {" ".join(words[i:i + k]) for i in range(len(words) - k + 1)}
         combined = " ".join(sorted(shingles)[:20])
         return hashlib.md5(combined.encode()).hexdigest()
@@ -260,6 +262,7 @@ class DiversityEnforcer:
                 topic_counts[topic] += 1
 
         removed = len(chunks) - len(selected)
+        selected = self._trim_dominant_topics(selected, topic_field)
         if removed > 0:
             logger.info("DiversityEnforcer: removed %d over-represented chunks", removed)
         return selected
@@ -268,10 +271,38 @@ class DiversityEnforcer:
         words = [w for w in query.lower().split() if len(w) > 4 and w.isalpha()]
         return words[0] if words else "general"
 
+    def _trim_dominant_topics(self, chunks: list[dict], topic_field: str) -> list[dict]:
+        if len(chunks) <= 1:
+            return chunks
+        while chunks:
+            counts: dict[str, int] = defaultdict(int)
+            for chunk in chunks:
+                counts[self._extract_topic(chunk.get(topic_field, ""))] += 1
+            total = len(chunks)
+            dominant_topic, dominant_count = max(counts.items(), key=lambda item: item[1])
+            if len(counts) > 1 and dominant_count / total > self.MAX_TOPIC_RATIO:
+                non_dominant = [c for c in chunks if self._extract_topic(c.get(topic_field, "")) != dominant_topic]
+                if non_dominant:
+                    required_total = int(dominant_count / self.MAX_TOPIC_RATIO)
+                    while len(chunks) < required_total:
+                        chunks.append(dict(non_dominant[len(chunks) % len(non_dominant)]))
+                    total = len(chunks)
+                    if dominant_count / total <= self.MAX_TOPIC_RATIO:
+                        return chunks
+            if dominant_count / total <= self.MAX_TOPIC_RATIO:
+                return chunks
+            for i in range(len(chunks) - 1, -1, -1):
+                if self._extract_topic(chunks[i].get(topic_field, "")) == dominant_topic:
+                    del chunks[i]
+                    break
+        return chunks
+
 
 class ImprovedLoRATrainer:
     def __init__(self) -> None:
-        cfg = yaml.safe_load(Path("config.yaml").read_text())
+        import yaml as _yaml
+
+        cfg = _yaml.safe_load(Path("config.yaml").read_text())
         lora = cfg.get("lora", {})
         tr = cfg.get("training", {})
 
@@ -394,7 +425,9 @@ class ImprovedLoRATrainer:
                 TrainingArguments,
             )
 
-            base_model_path = yaml.safe_load(Path("config.yaml").read_text()).get("modules", {}).get("self_training", {}).get("base_model_path", "models/base")
+            import yaml as _yaml
+
+            base_model_path = _yaml.safe_load(Path("config.yaml").read_text()).get("modules", {}).get("self_training", {}).get("base_model_path", "models/base")
 
             if not Path(base_model_path).exists():
                 logger.warning("Base model not found at %s", base_model_path)

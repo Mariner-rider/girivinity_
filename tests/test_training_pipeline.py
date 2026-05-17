@@ -1,3 +1,14 @@
+import sys
+from unittest.mock import MagicMock
+
+# Mock missing sandbox dependencies before any imports
+sys.modules.setdefault("yaml", MagicMock())
+sys.modules.setdefault("torch", MagicMock())
+sys.modules.setdefault("peft", MagicMock())
+sys.modules.setdefault("transformers", MagicMock())
+sys.modules.setdefault("datasets", MagicMock())
+sys.modules.setdefault("bitsandbytes", MagicMock())
+
 import tempfile
 from pathlib import Path
 
