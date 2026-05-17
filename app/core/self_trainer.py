@@ -97,13 +97,19 @@ class SelfTrainer:
             db.execute(f"UPDATE training_queue SET status='trained' WHERE id IN ({placeholders})", tuple(ids))
             self._log_event(ts, len(rows), "success")
 
-    def _run_lora_update(self, dataset_path: Path, version: str) -> bool:
-        """Delegate LoRA fine-tuning to the unified LoRATrainer."""
+    def _run_lora_update(
+        self, dataset_path: Path, version: str
+    ) -> bool:
+        """
+        Use the improved training pipeline instead of
+        the basic LoRATrainer.
+        """
         try:
-            from model.lora_trainer import LoRATrainer
-            return LoRATrainer().train(str(dataset_path), version)
+            from model.training_pipeline import ImprovedLoRATrainer
+            trainer = ImprovedLoRATrainer()
+            return trainer.train_from_jsonl(str(dataset_path), version)
         except Exception as exc:
-            logger.error("LoRATrainer failed: %s", exc)
+            logger.error("ImprovedLoRATrainer failed: %s", exc)
             return False
 
 

@@ -12,6 +12,43 @@ from app.core import db
 logger = logging.getLogger(__name__)
 
 
+GENERATION_CONFIGS = {
+    1: {
+        "dim": 3072, "n_layers": 28, "n_heads": 24,
+        "n_kv_heads": 8, "ffn_multiplier": 2.667,
+        "description": "Girivinity 3B — Foundation",
+    },
+    2: {
+        "dim": 4096, "n_layers": 32, "n_heads": 32,
+        "n_kv_heads": 8, "ffn_multiplier": 2.667,
+        "description": "Girivinity 7B — First Evolution",
+    },
+    3: {
+        "dim": 5120, "n_layers": 40, "n_heads": 40,
+        "n_kv_heads": 8, "ffn_multiplier": 2.667,
+        "description": "Girivinity 13B — Second Evolution",
+    },
+    4: {
+        "dim": 6656, "n_layers": 60, "n_heads": 52,
+        "n_kv_heads": 8, "ffn_multiplier": 2.667,
+        "description": "Girivinity 30B — Third Evolution",
+    },
+    5: {
+        "dim": 8192, "n_layers": 80, "n_heads": 64,
+        "n_kv_heads": 8, "ffn_multiplier": 2.667,
+        "description": "Girivinity 70B — Fourth Evolution",
+    },
+}
+
+CHUNK_THRESHOLDS_FOR_GENERATION = {
+    2: 100_000,
+    3: 500_000,
+    4: 2_000_000,
+    5: 10_000_000,
+}
+
+
+
 class SuccessorEngine:
     def __init__(self) -> None:
         cfg = yaml.safe_load(Path("config.yaml").read_text())
@@ -64,6 +101,37 @@ class SuccessorEngine:
         logger.info("Successor %s rejected", version)
         return True
 
+    def _get_next_generation(self) -> tuple[int, dict]:
+        """
+        Determines what generation the next model should be
+        based on how much training data has been accumulated.
+        """
+        total_trained = self._count_trained_chunks()
+
+        next_gen = 1
+        for gen, threshold in sorted(
+            CHUNK_THRESHOLDS_FOR_GENERATION.items()
+        ):
+            if total_trained >= threshold:
+                next_gen = gen
+
+        # Never exceed the highest defined generation
+        next_gen = min(next_gen, max(GENERATION_CONFIGS.keys()))
+
+        return next_gen, GENERATION_CONFIGS[next_gen]
+
+    def _get_current_generation(self) -> int:
+        """Read current generation from active model metadata."""
+        try:
+            meta = self.active_link / "generation.json"
+            if meta.exists():
+                import json
+                data = json.loads(meta.read_text())
+                return int(data.get("generation", 1))
+        except Exception:
+            pass
+        return 1
+
     def _run_daemon(self) -> None:
         logger.info("SuccessorEngine running, interval=%ds", self.check_interval_s)
         while True:
@@ -108,7 +176,53 @@ class SuccessorEngine:
         version_dir = self.versions_dir / version
         version_dir.mkdir(parents=True, exist_ok=True)
 
-        success = self._run_full_training(corpus_path, version_dir)
+        # Determine next generation config
+        next_gen, gen_cfg = self._get_next_generation()
+        current_gen       = self._get_current_generation()
+
+        # Only upgrade if generation increases or
+        # significant new data is available
+        if next_gen <= current_gen:
+            logger.info(
+                "SuccessorEngine: still at generation %d, "
+                "not enough data to upgrade. "
+                "Need %d chunks for gen %d.",
+                current_gen,
+                CHUNK_THRESHOLDS_FOR_GENERATION.get(
+                    current_gen + 1, 999_999_999
+                ),
+                current_gen + 1,
+            )
+
+        # Update architecture config for this generation
+        from model.architecture import GirivinityConfig
+        new_cfg = GirivinityConfig(
+            dim=gen_cfg["dim"],
+            n_layers=gen_cfg["n_layers"],
+            n_heads=gen_cfg["n_heads"],
+            n_kv_heads=gen_cfg["n_kv_heads"],
+            ffn_multiplier=gen_cfg["ffn_multiplier"],
+        )
+
+        # Save new config so train.py picks it up
+        import yaml
+        cfg_override = self.versions_dir / version / "arch_config.yaml"
+        cfg_override.parent.mkdir(parents=True, exist_ok=True)
+        cfg_override.write_text(yaml.dump({
+            "architecture": {
+                "dim":            new_cfg.dim,
+                "n_layers":       new_cfg.n_layers,
+                "n_heads":        new_cfg.n_heads,
+                "n_kv_heads":     new_cfg.n_kv_heads,
+                "ffn_multiplier": new_cfg.ffn_multiplier,
+                "vocab_size":     new_cfg.vocab_size,
+                "max_seq_len":    new_cfg.max_seq_len,
+                "norm_eps":       new_cfg.norm_eps,
+                "rope_theta":     new_cfg.rope_theta,
+            }
+        }))
+
+        success = self._run_full_training(corpus_path, version_dir, next_gen, gen_cfg)
         if not success:
             logger.error("Full training failed for version %s", version)
             return
@@ -134,6 +248,9 @@ class SuccessorEngine:
             improvement_percent=improvement,
             trained_on_chunks=self._count_trained_chunks(),
             perplexity=perplexity,
+            current_gen=current_gen,
+            next_gen=next_gen,
+            gen_cfg=gen_cfg,
         )
 
     def _export_corpus(self, version: str) -> Path | None:
@@ -157,7 +274,7 @@ class SuccessorEngine:
         logger.info("Exported %d chunks to %s", len(rows), corpus_path)
         return corpus_path
 
-    def _run_full_training(self, corpus_path: Path, output_dir: Path) -> bool:
+    def _run_full_training(self, corpus_path: Path, output_dir: Path, next_gen: int, gen_cfg: dict) -> bool:
         try:
             from model.train import train
 
@@ -170,6 +287,16 @@ class SuccessorEngine:
                 lr=3e-4,
                 grad_accum=8,
             )
+            import json
+            gen_meta = Path(output_dir) / "generation.json"
+            gen_meta.write_text(json.dumps({
+                "generation": next_gen,
+                "description": gen_cfg["description"],
+                "trained_on_chunks": self._count_trained_chunks(),
+                "trained_at": datetime.utcnow().isoformat(),
+                "dim": gen_cfg["dim"],
+                "n_layers": gen_cfg["n_layers"],
+            }, indent=2))
             return True
         except Exception as exc:
             logger.error("Full training error: %s", exc)
@@ -241,6 +368,9 @@ class SuccessorEngine:
         improvement_percent: float,
         trained_on_chunks: int,
         perplexity: float,
+        current_gen: int,
+        next_gen: int,
+        gen_cfg: dict,
     ) -> None:
         self.notifications_path.parent.mkdir(parents=True, exist_ok=True)
         notification = {
@@ -252,6 +382,13 @@ class SuccessorEngine:
             "perplexity": round(perplexity, 4),
             "timestamp": datetime.utcnow().isoformat(),
             "status": "awaiting_admin_approval",
+            "current_generation": current_gen,
+            "next_generation":    next_gen,
+            "model_description":  gen_cfg["description"],
+            "param_scale":        gen_cfg["dim"],
+            "chunks_needed_for_next": CHUNK_THRESHOLDS_FOR_GENERATION.get(
+                next_gen + 1, "maximum_reached"
+            ),
         }
         with open(self.notifications_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(notification) + "\n")
