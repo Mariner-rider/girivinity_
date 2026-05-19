@@ -266,3 +266,10 @@ cyber_shield:
   contain_threshold:  0.9
   emergency_auto:     true
   log_clean_requests: false
+
+
+agent_mode:
+  agents_dir: data/agents
+  similarity_threshold: 0.5
+  max_steps_per_agent: 10
+  learn_from_results: true
