@@ -1,729 +1,307 @@
-# Girivinity — Self-Learning AI System
+# Girivinity — Autonomous Self-Learning AI Platform
 
-Girivinity is a self-improving, self-learning AI system built from scratch.
-It retrieves live information from the web, synthesises answers using its
-own language model, verifies every claim before responding, and continuously
-trains itself on everything it learns — with no human intervention required
-after deployment.
+## What Girivinity Is
+Girivinity is a FastAPI-based AI platform that combines retrieval, reasoning, synthesis, security enforcement, memory, and continuous model improvement in one integrated runtime. A single user request can trigger security analysis, profile-aware response shaping, retrieval from local/web sources, grounded answer generation, and asynchronous learning updates.
 
-It is not a wrapper around ChatGPT, Claude, or any other external model.
-Every component — the transformer architecture, the training pipeline, the
-retrieval system, the self-improvement loop — is built and owned entirely
-within this codebase.
+What makes Girivinity different is that it is architected as a *system of collaborating engines* rather than a single chat wrapper. The platform includes a domain router, truth/citation stack, cyber-defense middleware, skill generation, CUDA code generation/benchmarking, successor-model governance, and autonomous agent orchestration that can create/reuse/adapt task agents on demand.
 
----
+Girivinity is built for India-first and global usage: strong support for Indian legal/education/finance contexts, plus globally relevant research, engineering, and enterprise workflows. The goal is practical intelligence that is safer, auditable, and continuously improving for developers, researchers, students, founders, security teams, and institutions.
 
-## Table of Contents
+## The Complete System Architecture
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                CLIENTS                                      │
+│  Web UI / API clients / internal services                                   │
+└───────────────────────────────┬──────────────────────────────────────────────┘
+                                │ HTTP
+┌───────────────────────────────▼──────────────────────────────────────────────┐
+│                           FASTAPI APPLICATION                               │
+│  app/main.py                                                                 │
+│  Routers: /chat /agents /security /skills /cuda /admin /health /tenant/*   │
+│  Middleware: CyberShield                                                     │
+└───────────────┬───────────────────────────────────────────────┬──────────────┘
+                │                                               │
+      ┌─────────▼─────────┐                           ┌────────▼────────┐
+      │  CHAT PIPELINE     │                           │  AGENT MODE      │
+      │  /chat/message     │                           │  /agents/*        │
+      └─────────┬─────────┘                           └────────┬────────┘
+                │                                              │
+   Threat + Jailbreak checks                                   │
+                │                                              │
+   Agent request detection ────────────────yes─────────────────┘
+                │ no
+                ▼
+      SentimentEngine + SocialEngine + MemoryEngine
+                │
+      QueryRouter ──► KB hit OR WebIntelligence fallback
+                │
+      CognitiveEngine context enrichment
+                │
+      LLMSynthesiser + DomainRouter prompt injection
+                │
+      Truth/Citation/Grounding controls
+                │
+             ChatResponse
 
-1. [What Makes This Different](#what-makes-this-different)
-2. [System Architecture](#system-architecture)
-3. [How Self-Learning Works](#how-self-learning-works)
-4. [How Successor Models Work](#how-successor-models-work)
-5. [Repository Structure](#repository-structure)
-6. [Component Reference](#component-reference)
-7. [API Reference](#api-reference)
-8. [Deployment Guide — Step by Step](#deployment-guide)
-9. [Development Guide](#development-guide)
-10. [Configuration Reference](#configuration-reference)
-11. [Roadmap](#roadmap)
+Background / Async Planes:
+- SelfTrainer queue + LoRA training
+- SkillForge generation + evaluation
+- Memory writes
+- SuccessorEngine governance + model-version approvals
+- Security telemetry and incident state
+```
 
----
+## Core Intelligence Pipeline
+1. **Query ingress**: `/chat/message` receives query + user_id.
+2. **Security first**: AI threat reasoner + jailbreak classifier evaluate request.
+3. **Agent mode switch**: if query matches agent triggers, route to `AgentOrchestrator`.
+4. **Sentiment analysis**: `SentimentEngine` infers tone/style needs.
+5. **Social model update**: `SocialEngine` updates user-context profile.
+6. **Memory recall**: `MemoryEngine` retrieves relevant long-term context.
+7. **Cognitive framing**: `CognitiveEngine` adds reasoning guidance.
+8. **Retrieval**: `QueryRouter` chooses KB/web path and gathers context/URLs.
+9. **Synthesis**: `LLMSynthesiser` generates answer, domain-conditioned by `DomainRouter`.
+10. **Truth-grounded response**: citation/trust controls shape final confidence and source set.
+11. **Response + async learning hooks**: return answer; persist memory/analytics/training queue.
 
-## What Makes This Different
+## Self-Learning Pipeline
+Girivinity’s learning loop is orchestrated around retrieval outputs and post-response signals:
 
-Most AI products are wrappers. They call OpenAI or Anthropic and format
-the response. Girivinity is not that.
+1. **Web acquisition**: `WebIntelligence` fetches, cleans, chunks, and scores web content.
+2. **Poison guard**: `TrainingPoisonGuard` screens suspicious or adversarial training inputs.
+3. **Quality scoring**: retrieval/chunk relevance scores rank candidate learning data.
+4. **Deduplication**: chunk IDs/hash-based filtering prevent replaying duplicates.
+5. **Curriculum queueing**: high-quality chunks are queued through `SelfTrainer`.
+6. **Replay batches**: queued chunks are converted to trainable examples.
+7. **QLoRA/LoRA training**: adapter fine-tuning runs with configured cadence/thresholds.
+8. **Adapter promotion**: latest successful adapter becomes active (`models/adapters/latest`).
 
-**It owns its own model.** The GirivinityModel is a decoder-only transformer
-built from scratch in PyTorch — RMSNorm, Rotary Position Embeddings, Grouped
-Query Attention, SwiGLU feed-forward, weight-tied LM head. ~360M parameters.
-Quantised to Q4_K_M GGUF for CPU inference on a standard VPS.
+## Autonomous Agent Mode
+Autonomous Agent Mode allows users to ask for specialized agents in natural language (e.g., “create an agent to monitor…”, “build an agent to research…”).
 
-**It learns while it runs.** Every query that misses the knowledge base
-triggers a live web search. The retrieved content is queued for training.
-Every 30 minutes the self-trainer fires LoRA fine-tuning automatically
-in a background process. The model gets smarter every day it runs.
+### Agent types
+- research
+- code
+- data_analysis
+- monitoring
+- writing
+- legal_research
+- financial
+- teaching
+- security
+- custom
 
-**It creates its own successors.** When the knowledge base crosses 100,000
-trained chunks, the system automatically retrains a new model version from
-scratch, evaluates it against the current model, and notifies the admin.
-One API call approves it. The new model goes live.
+### Lifecycle
+1. **Forge / reuse / adapt** (`AgentOrchestrator` + `AgentForge` + `AgentRegistry`).
+2. **Run** stepwise via `AgentRunner` and core tools.
+3. **Learn** by pushing outputs/sources into `SelfTrainer`, `SkillForge`, `MemoryEngine`.
+4. **Rest** with persisted status and usage metadata in registry storage.
 
-**It never fabricates sources.** Every response passes through the
-TruthEngine, which verifies each factual claim against the knowledge base
-and attached web sources. Unverified claims are flagged. Confidence is
-scored 0.0–1.0. Citations only appear for URLs that actually exist in
-the current session's retrieved data.
+## CyberShield — 7 Security Layers
+1. **CyberShield middleware** — centralized request-time defense and policy enforcement.
+2. **AI threat reasoning** — blocks high-risk intent and abuse patterns.
+3. **Jailbreak classification** — blocks prompt-injection / override attempts.
+4. **Threat detector** — flags exploit signatures (path traversal, SSRF patterns, etc.).
+5. **Model-steal detector** — identifies extraction/probing behavior.
+6. **Training poison guard** — blocks malicious/low-trust data from training pipeline.
+7. **Security mode controls** — `/security` operations for incident mode and emergency response.
 
-**It runs on low compute.** Inference runs CPU-only on a 4GB VPS.
-LoRA fine-tuning triggers on demand on the cheapest GPU instance available
-(Lambda Labs T4, ~$0.35/hour). Full successor retraining runs once every
-few months automatically.
+## Intelligence Engines (4 layers)
+1. **Cognitive Engine**: adds structured reasoning scaffolding before synthesis.
+2. **Sentiment Engine**: adapts tone, empathy, and communication style.
+3. **Social Engine**: tracks user interaction profile for personalized context injection.
+4. **Memory Engine**: recalls and persists user-specific conversational knowledge.
 
----
+## Knowledge Domains (25 domains)
+The current platform has **15 active router domains** and a **25-domain catalog target** for coverage scaling.
 
-## System Architecture
-User Query
-│
-▼
-┌─────────────────────────────────────┐
-│           QueryRouter               │
-│  Embeds query → searches ChromaDB   │
-│  Score ≥ 0.72 → Knowledge Base hit  │
-│  Score < 0.72 → Web search          │
-└──────────┬──────────────┬───────────┘
-│              │
-KB Hit │              │ KB Miss
-│              ▼
-│   ┌─────────────────────┐
-│   │   WebIntelligence   │
-│   │  DuckDuckGo search  │
-│   │  httpx fetch        │
-│   │  trafilatura clean  │
-│   │  chunk + score      │
-│   └────────┬────────────┘
-│            │
-│            ├──────────────────────────────────┐
-│            │                                  │
-│            ▼                                  ▼
-│   Returns top 3 chunks            Background daemon thread
-│                                   SelfTrainer.queue()
-│                                   → SQLite pending_training
-│                                   → Every 30min: LoRA update
-▼
-┌─────────────────────────────────────┐
-│          LLMSynthesiser             │
-│  Builds prompt: system + context    │
-│  Calls GirivinityEngine.generate()  │
-│  Fallback to extraction if no model │
-└──────────┬──────────────────────────┘
-│
-▼
-┌─────────────────────────────────────┐
-│           TruthEngine               │
-│  Extracts factual claims            │
-│  Verifies each claim vs ChromaDB    │
-│  Labels: KB_SOURCED / WEB_SOURCED   │
-│          / UNVERIFIED               │
-│  Adds disclaimer if >30% unverified │
-│  Appends real citations only        │
-│  Scores confidence 0.0–1.0          │
-└──────────┬──────────────────────────┘
-│
-▼
-Response to User
-{answer, source, confidence, urls}
+| # | Domain | Description | Status |
+|---|---|---|---|
+| 1 | cuda_kernels | CUDA kernels, NVCC, GPU optimization | Active |
+| 2 | space_astronomy | ISRO/NASA/astrophysics/orbits | Active |
+| 3 | computer_science | CS fundamentals, systems, networking | Active |
+| 4 | three_d_design | 3D modeling/rendering/game engines | Active |
+| 5 | artificial_intelligence | ML/DL/LLMs/CV/NLP | Active |
+| 6 | medical_clinical | Clinical/diagnostic/medical concepts | Active |
+| 7 | indian_legal | BNS/BNSS/IPC/case-law context | Active |
+| 8 | international_law | Treaties, GDPR, comparative law | Active |
+| 9 | business_strategy | Startups, GTM, funding, strategy | Active |
+|10 | accounting_finance | Tax, audit, finance/compliance | Active |
+|11 | mathematics | Core pure/applied mathematics | Active |
+|12 | education_pedagogy | Teaching and learning workflows | Active |
+|13 | research_academia | Papers, citations, methodology | Active |
+|14 | history_geopolitics | Historical/geopolitical analysis | Active |
+|15 | economics | Macro/micro/policy/economic data | Active |
+|16 | cybersecurity_ops | SOC/DFIR/defensive operations | Planned |
+|17 | devops_sre | CI/CD, reliability, observability | Planned |
+|18 | cloud_architecture | Multi-cloud design and governance | Planned |
+|19 | data_engineering | Pipelines, warehousing, ETL/ELT | Planned |
+|20 | product_management | Discovery, roadmaps, prioritization | Planned |
+|21 | ux_hci | UX research, IA, interaction design | Planned |
+|22 | public_policy | Policy analysis and governance | Planned |
+|23 | agriculture_food | Agri systems, crop/food value chains | Planned |
+|24 | energy_climate | Energy systems, climate adaptation | Planned |
+|25 | manufacturing_industry4 | Automation, QA, industrial analytics | Planned |
 
----
+## Model Architecture
+Girivinity uses a custom `GirivinityModel` family with roadmap scaling (current config is transformer-based with LoRA adapter workflows). The architecture notes include three practical improvements:
 
-## How Self-Learning Works
+1. **KV sharing**: shares key/value structures efficiently to reduce memory pressure and improve inference throughput.
+2. **PLE (Progressive Layer Efficiency)**: emphasizes compute where it yields the largest quality gain, improving cost-quality balance.
+3. **mHC (multi-head calibration)**: calibrates attention heads for more stable reasoning and better cross-domain retention.
 
-Every time a user asks something the knowledge base does not know:
+In plain language: these optimizations aim to make the model *faster, cheaper, and more consistent* as it grows.
 
-1. **WebIntelligence** fires — searches DuckDuckGo, fetches top 5 URLs,
-   extracts clean text via trafilatura, chunks into 400-token segments,
-   scores relevance via cosine similarity.
-
-2. Top 3 chunks become the **context** for the current answer.
-
-3. All chunks above the relevance threshold are written to the
-   **SQLite training queue** in a background daemon thread.
-   The user receives their answer immediately — training never blocks.
-
-4. Every 30 minutes the **SelfTrainer** daemon wakes up and checks
-   how many chunks are pending.
-
-5. When the count reaches 50 (configurable), it:
-   - Formats chunks as instruction pairs
-   - Saves as JSONL dataset
-   - Loads the current base model + latest LoRA adapter
-   - Runs LoRA fine-tuning (3 epochs, lr=2e-4)
-   - Saves the new adapter
-   - Updates the `models/adapters/latest` symlink
-   - Logs the training event
-
-6. If training loss exceeds the abort threshold, the update is
-   discarded and an alert is written to `logs/alerts.jsonl`.
-
-The model gets a LoRA update multiple times per day under normal usage.
-Each update makes it more knowledgeable about the topics users actually
-ask about.
-
----
-
-## How Successor Models Work
-
-LoRA adapters improve the existing model. Successor models are full
-retrains from scratch — a completely new generation.
-
-The **SuccessorEngine** daemon checks two triggers every 24 hours:
-
-| Trigger | Condition | Meaning |
-|---------|-----------|---------|
-| Knowledge growth | trained chunks ≥ 100,000 | Enough new knowledge for a fundamentally better model |
-| Quality degradation | rolling avg feedback < 3.5/5.0 | Users rating answers poorly |
-
-When either triggers:
-
-1. Full corpus exported from trained SQLite rows to JSONL
-2. GirivinityModel retrained from scratch on the full corpus
-3. Perplexity evaluated on held-out sample
-4. If new model perplexity is lower (better) than current:
-   - Saved to `models/versions/{timestamp}/`
-   - Notification written to `logs/admin_notifications.jsonl`
-   - Status: `awaiting_admin_approval`
-5. Admin calls `POST /admin/approve-successor/{version}`
-6. `models/active` symlink updated → new model goes live
-
-**The system never deploys itself without admin approval.**
-Every generation upgrade requires one human confirmation.
-
-Each successor model has measurably lower perplexity than its predecessor.
-The improvement percentage is included in the notification.
-
----
-
-## Repository Structure
-girivinity/
-│
-├── app/                          # FastAPI application
-│   ├── main.py                   # App entry point, startup wiring
-│   ├── core/                     # Intelligence layer
-│   │   ├── query_router.py       # Routes queries: KB or web
-│   │   ├── web_intelligence.py   # Live web search + chunking
-│   │   ├── self_trainer.py       # Continuous LoRA training daemon
-│   │   ├── llm_synthesiser.py    # Context → answer via LLM
-│   │   ├── truth_engine.py       # Claim verification + citations
-│   │   ├── successor_engine.py   # Successor model creation daemon
-│   │   ├── config_loader.py      # YAML config helpers
-│   │   └── config_schema.py      # Config validation
-│   └── api/
-│       └── routes/
-│           ├── chat.py           # POST /chat/message
-│           ├── admin.py          # Admin successor management
-│           └── health.py         # GET /health, /health/deep
-│
-├── model/                        # Custom transformer model
-│   ├── architecture.py           # GirivinityModel (PyTorch from scratch)
-│   ├── tokeniser.py              # BPE tokeniser trainer
-│   ├── train.py                  # Full training script
-│   └── quantise.py               # GGUF export for CPU inference
-│
-├── agent_controller.py           # Multi-agent orchestration
-├── knowledge_distillation_engine.py
-├── user_behavior_engine.py
-├── analytics_engine.py
-├── llm_loader.py                 # GGUF model loader (llama-cpp-python)
-├── llm_engine.py                 # GirivinityEngine inference wrapper
-├── language_router.py
-├── context_optimization_engine.py
-├── instruction_following_engine.py
-├── multimodal_engine.py
-├── response_planning_engine.py
-├── tool_selection_engine.py
-├── inter_model_protocol.py
-│
-├── tests/                        # Pytest test suite
-│   ├── test_query_router.py
-│   ├── test_web_intelligence.py
-│   ├── test_self_trainer.py
-│   ├── test_chat_endpoint.py
-│   ├── test_llm_synthesiser.py
-│   ├── test_truth_engine.py
-│   ├── test_successor_engine.py
-│   ├── test_architecture.py
-│   └── test_train.py
-│
-├── data/                         # Runtime data (git-ignored)
-│   ├── chroma/                   # ChromaDB vector store
-│   ├── training_queue/           # JSONL training batches
-│   └── seed_corpus.txt           # Bootstrap text
-│
-├── models/                       # Model files (git-ignored)
-│   ├── tokeniser/                # Saved BPE tokeniser
-│   ├── base/                     # Trained base model weights
-│   ├── adapters/                 # LoRA adapters
-│   │   └── latest -> {version}/  # Symlink to current adapter
-│   ├── girivinity_quantised/     # GGUF model for inference
-│   │   └── model.gguf
-│   ├── versions/                 # Successor model versions
-│   └── active -> {version}/      # Symlink to active model
-│
-├── logs/                         # Runtime logs (git-ignored)
-│   ├── self_training.jsonl
-│   ├── alerts.jsonl
-│   └── admin_notifications.jsonl
-│
-├── config.yaml                   # All system configuration
-├── requirements.txt
-├── Makefile
-└── docs/
-└── DEPLOYMENT.md
-
----
-
-## Component Reference
-
-### QueryRouter — `app/core/query_router.py`
-The brain of every request. Embeds the query using
-`all-MiniLM-L6-v2`, searches ChromaDB with cosine similarity.
-Score ≥ 0.72 returns knowledge base chunks immediately.
-Score < 0.72 delegates to WebIntelligence and fires self-training
-in a background thread. Never blocks the response.
-
-### WebIntelligence — `app/core/web_intelligence.py`
-Searches DuckDuckGo (no API key needed), fetches top 5 URLs
-via httpx, extracts clean article text via trafilatura,
-chunks to 400 tokens with 50-token overlap, scores each chunk
-for relevance to the original query, stores qualifying chunks
-in the ChromaDB `pending_training` collection.
-
-### SelfTrainer — `app/core/self_trainer.py`
-Runs as a `multiprocessing.Process` daemon started at FastAPI
-startup. Checks the SQLite queue every 30 minutes. When ≥50
-pending chunks exist, formats them as instruction pairs,
-runs LoRA fine-tuning via PEFT on the base model, saves the
-new adapter, updates the `latest` symlink.
-Aborts training if loss exceeds threshold and alerts admin.
-
-### LLMSynthesiser — `app/core/llm_synthesiser.py`
-Wraps the GirivinityEngine to produce natural language answers
-from retrieved context. Uses a system prompt that constrains
-the model to only use provided context — reducing hallucination
-at the prompt level before TruthEngine verification.
-Falls back to structured extraction if the model is not yet built.
-Streaming responses append sources inline as they yield.
-
-### TruthEngine — `app/core/truth_engine.py`
-Post-generation verification layer. Splits every response into
-individual factual claims, verifies each against ChromaDB
-(similarity ≥ 0.70 = KB_SOURCED), checks against web sources
-(WEB_SOURCED), or marks as UNVERIFIED. If >30% of claims are
-unverified, prepends a disclaimer. Scores confidence 0.0–1.0.
-Only appends citations for URLs that actually exist in the
-current session's retrieved data — never fabricates sources.
-
-### SuccessorEngine — `app/core/successor_engine.py`
-24-hour daemon. Monitors two triggers: knowledge base chunk
-count and rolling average feedback score. When triggered,
-exports full training corpus, retrains GirivinityModel from
-scratch, evaluates perplexity, and writes an admin notification
-if the new model is better. Admin approves via API — the engine
-never auto-deploys.
-
-### GirivinityModel — `model/architecture.py`
-Custom decoder-only transformer. PyTorch only — no HuggingFace.
-Components: RMSNorm, RoPE, Grouped Query Attention (16 heads,
-4 KV heads), SwiGLU FFN, weight-tied LM head. ~360M parameters
-at full config. KV-cache supported for fast autoregressive
-inference. Quantised to Q4_K_M GGUF via llama.cpp for CPU
-inference on 4GB RAM.
-
----
+## Generation Roadmap
+| Generation | Target Size | Chunk Threshold Trigger | Goal |
+|---|---:|---:|---|
+| G1 | 3B | 100k trained chunks | Stable base + autonomous learning |
+| G2 | 7B | 300k trained chunks | Better reasoning depth |
+| G3 | 13B | 700k trained chunks | Strong multi-domain expert quality |
+| G4 | 30B | 2M trained chunks | Enterprise-grade complex planning |
+| G5 | 70B | 5M trained chunks | Frontier-scale autonomous platform |
 
 ## API Reference
-
 ### Chat
+- `POST /chat/message`
+- `POST /chat/message/stream`
 
-**POST /chat/message**
-```json
-Request:  { "query": "string", "user_id": "string", "stream": false }
-Response: { "answer": "string", "source": "knowledge_base|web|none",
-            "confidence": 0.0-1.0, "urls": ["string"] }
-```
+### Agents
+- `POST /agents/run`
+- `GET /agents/list`
+- `GET /agents/{agent_id}`
+- `DELETE /agents/{agent_id}`
+- `POST /agents/{agent_id}/run`
 
-**POST /chat/message/stream**
-Request:  { "query": "string", "user_id": "string" }
-Response: text/plain streaming — tokens arrive as they are generated
+### Security
+- `GET /security/status`
+- `GET /security/events`
+- `POST /security/mode/{mode}`
+- `POST /security/emergency/resolve`
+- `GET /security/threat-summary`
+
+### Skills
+- `GET /skills/`
+- `GET /skills/{slug}`
+- `POST /skills/feedback`
+- `POST /skills/{slug}/evaluate`
+- `DELETE /skills/{slug}`
+
+### CUDA
+- `POST /cuda/generate`
+- `POST /cuda/benchmark`
+- `GET /cuda/types`
+- `POST /cuda/bootstrap`
 
 ### Admin
-
-**GET /admin/notifications**
-```json
-Response: { "notifications": [
-  { "type": "successor_ready", "version": "20240101_120000",
-    "previous_version": "none", "improvement_percent": 12.5,
-    "trained_on_chunks": 105000, "perplexity": 38.4,
-    "timestamp": "ISO8601", "status": "awaiting_admin_approval" }
-]}
-```
-
-**POST /admin/approve-successor/{version}**
-```json
-Response: { "status": "approved", "version": "20240101_120000" }
-```
-
-**POST /admin/reject-successor/{version}**
-```json
-Response: { "status": "rejected", "version": "20240101_120000" }
-```
-
-**GET /admin/model-versions**
-```json
-Response: { "versions": ["20240201_080000", "20240101_120000"] }
-```
-
-**POST /admin/feedback**
-```json
-Request:  { "user_id": "string", "score": 1.0-5.0 }
-Response: { "status": "recorded" }
-```
+- `GET /admin/notifications`
+- `POST /admin/approve-successor/{version}`
+- `POST /admin/reject-successor/{version}`
+- `GET /admin/model-versions`
+- `POST /admin/feedback`
+- `GET /admin/generation-roadmap`
 
 ### Health
+- `GET /health`
+- `GET /health/deep`
+- `GET /metrics`
+- `GET /modules`
 
-**GET /health** → `{ "status": "ok", "service": "girivinity" }`
-
-**GET /health/deep** → `{ "status": "ok|degraded", "issues": [] }`
-
----
+### Tenant security
+- `GET /tenant/security/config`
+- `PUT /tenant/security/config`
 
 ## Deployment Guide
+1. **Clone**
+   ```bash
+   git clone <your-repo-url>
+   cd girivinity_
+   ```
+2. **Create environment**
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   ```
+3. **Install dependencies**
+   ```bash
+   pip install -U pip
+   pip install -e .
+   ```
+4. **Configure**
+   - Edit `config.yaml` (model, training, security, agent_mode, database).
+5. **Run migrations / setup services**
+   - Ensure Postgres and configured stores are available.
+6. **Start app**
+   ```bash
+   make run
+   ```
+7. **Verify endpoints**
+   - `GET /health`
+   - `GET /health/deep`
+   - `GET /modules`
 
-### Requirements
-
-| Resource | Minimum | Recommended |
-|----------|---------|-------------|
-| RAM | 4 GB | 8 GB |
-| CPU | 2 cores | 4 cores |
-| Storage | 20 GB | 40 GB |
-| OS | Ubuntu 22.04 | Ubuntu 22.04 |
-| GPU | Not required | Optional (speeds training) |
-
----
-
-### Step 1 — Clone and install
-
-```bash
-git clone https://github.com/Mariner-rider/girivinity_
-cd girivinity_
-pip install -r requirements.txt
+## Repository Structure
+```text
+girivinity_/
+├── app/
+│   ├── main.py
+│   ├── api/routes/
+│   │   ├── chat.py
+│   │   ├── agents.py
+│   │   ├── security.py
+│   │   ├── tenant_security.py
+│   │   ├── skills.py
+│   │   ├── cuda.py
+│   │   ├── admin.py
+│   │   └── health.py
+│   ├── core/
+│   │   ├── agent_forge.py
+│   │   ├── agent_registry.py
+│   │   ├── agent_runner.py
+│   │   ├── agent_orchestrator.py
+│   │   ├── query_router.py
+│   │   ├── web_intelligence.py
+│   │   ├── llm_synthesiser.py
+│   │   ├── truth_engine.py
+│   │   ├── citation_engine.py
+│   │   ├── domain_router.py
+│   │   ├── self_trainer.py
+│   │   ├── successor_engine.py
+│   │   ├── skill_forge.py
+│   │   ├── memory_engine.py
+│   │   ├── sentiment_engine.py
+│   │   ├── social_engine.py
+│   │   └── cognitive_engine.py
+│   ├── security/
+│   │   ├── cyber_shield.py
+│   │   ├── ai_threat_reasoner.py
+│   │   ├── jailbreak_classifier.py
+│   │   ├── threat_detector.py
+│   │   ├── model_steal_detector.py
+│   │   └── training_poison_guard.py
+│   └── monitoring/
+├── model/
+│   ├── architecture.py
+│   ├── inference.py
+│   ├── tokeniser.py
+│   ├── training_pipeline.py
+│   ├── train.py
+│   ├── domain_trainer.py
+│   └── quantise.py
+├── tests/
+├── docs/
+├── config.yaml
+├── Makefile
+└── README.md
 ```
 
-Verify installation:
-```bash
-python -c "import torch, chromadb, sentence_transformers; print('OK')"
-```
+## What Makes Girivinity Different
+| Capability | Girivinity | GPT-4 (hosted) | Claude (hosted) | Gemini (hosted) |
+|---|---|---|---|---|
+| Self-hostable full stack | Yes | No (closed hosted) | No (closed hosted) | No (closed hosted) |
+| Autonomous agent forge/reuse/adapt | Yes | Tool-dependent | Tool-dependent | Tool-dependent |
+| Built-in training queue + adapter updates | Yes | Not user-owned | Not user-owned | Not user-owned |
+| Security-mode APIs and incident controls | Yes | Limited app-side only | Limited app-side only | Limited app-side only |
+| Domain-router + India-specific legal/education emphasis | Yes | General | General | General |
+| Successor model governance endpoints | Yes | No | No | No |
 
----
-
-### Step 2 — Create required directories
-
-```bash
-mkdir -p data/chroma data/training_queue logs \
-         models/tokeniser models/base models/adapters \
-         models/girivinity_quantised models/versions
-```
-
----
-
-### Step 3 — Create seed corpus
-
-The tokeniser needs text to learn from. This seeds it:
-
-```bash
-cat > data/seed_corpus.txt << 'EOF'
-Girivinity is an intelligent self-learning AI system built in India.
-It retrieves information from the web and continuously improves itself.
-Artificial intelligence is the simulation of human intelligence by machines.
-Machine learning enables computers to learn from data without being programmed.
-Natural language processing allows computers to understand human language.
-Deep learning uses neural networks with many layers to learn complex patterns.
-India is a country in South Asia with a population of over 1.4 billion people.
-Technology is transforming every industry from healthcare to agriculture.
-EOF
-```
-
----
-
-### Step 4 — Train the tokeniser
-
-```bash
-python model/tokeniser.py
-```
-
-Expected output:
-Tokeniser saved to models/tokeniser/tokeniser.json
-
----
-
-### Step 5 — Seed the training database
-
-Before the model can be trained, the SQLite queue needs initial data:
-
-```bash
-python - << 'EOF'
-import sqlite3, json, datetime
-from pathlib import Path
-
-db = Path("data/training.db")
-db.parent.mkdir(exist_ok=True)
-conn = sqlite3.connect(db)
-conn.execute("""
-    CREATE TABLE IF NOT EXISTS training_queue (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        query TEXT NOT NULL, chunk_text TEXT NOT NULL,
-        url TEXT DEFAULT '', score REAL DEFAULT 0.0,
-        timestamp TEXT NOT NULL, status TEXT DEFAULT 'pending'
-    )
-""")
-seeds = [
-    ("What is artificial intelligence",
-     "Artificial intelligence is the simulation of human intelligence "
-     "processes by machines, especially computer systems."),
-    ("How does machine learning work",
-     "Machine learning is a subset of AI that enables systems to learn "
-     "and improve from experience without being explicitly programmed."),
-    ("What is deep learning",
-     "Deep learning is part of machine learning based on artificial "
-     "neural networks with representation learning."),
-]
-ts = datetime.datetime.utcnow().isoformat()
-for q, c in seeds:
-    conn.execute(
-        "INSERT INTO training_queue (query,chunk_text,url,score,timestamp,status)"
-        " VALUES (?,?,?,?,?,?)", (q, c, "", 0.9, ts, "pending")
-    )
-conn.commit()
-conn.close()
-print(f"Seeded {len(seeds)} training records")
-EOF
-```
-
----
-
-### Step 6 — Train the initial base model
-
-This trains GirivinityModel from scratch. On CPU this takes time —
-start it in a screen or tmux session:
-
-```bash
-screen -S girivinity-train
-python model/train.py \
-  --data data/training_queue \
-  --tokeniser models/tokeniser/tokeniser.json \
-  --output models/base \
-  --epochs 3 \
-  --batch 2 \
-  --grad-accum 8
-```
-
-Training logs appear every 100 steps. When complete:
-Training complete. Model saved to models/base/final
-
-Press `Ctrl+A, D` to detach from screen.
-
----
-
-### Step 7 — Quantise to GGUF
-
-Required for CPU inference. First clone llama.cpp:
-
-```bash
-git clone https://github.com/ggerganov/llama.cpp
-cd llama.cpp && make && cd ..
-```
-
-Then quantise:
-
-```bash
-python model/quantise.py \
-  --weights models/base/final \
-  --output models/girivinity_quantised \
-  --quant Q4_K_M
-```
-
-Verify the output:
-```bash
-ls -lh models/girivinity_quantised/model.gguf
-```
-
----
-
-### Step 8 — Update config.yaml
-
-Make sure these paths are set correctly:
-
-```yaml
-model:
-  quantised_path: models/girivinity_quantised/model.gguf
-  n_ctx: 4096
-  n_threads: 3        # cpu_count - 1
-  n_gpu_layers: 0     # 0 = CPU only
-
-training:
-  queue_db: data/training.db
-
-rag:
-  chroma_path: data/chroma
-```
-
----
-
-### Step 9 — Start the server
-
-```bash
-# Production
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
-
-# Or with Makefile
-make run
-```
-
----
-
-### Step 10 — Verify everything works
-
-```bash
-# Basic health
-curl http://localhost:8000/health
-
-# Deep health (checks ChromaDB + embedder)
-curl http://localhost:8000/health/deep
-
-# Send your first query
-curl -X POST http://localhost:8000/chat/message \
-  -H "Content-Type: application/json" \
-  -d '{"query": "What is artificial intelligence?", "user_id": "test"}'
-```
-
-Expected response shape:
-```json
-{
-  "answer": "...",
-  "source": "knowledge_base",
-  "confidence": 0.85,
-  "urls": []
-}
-```
-
----
-
-### Step 11 — Keep it running with systemd
-
-```bash
-sudo nano /etc/systemd/system/girivinity.service
-```
-
-Paste:
-```ini
-[Unit]
-Description=Girivinity AI Server
-After=network.target
-
-[Service]
-User=ubuntu
-WorkingDirectory=/home/ubuntu/girivinity_
-ExecStart=/usr/bin/python3 -m uvicorn app.main:app \
-          --host 0.0.0.0 --port 8000 --workers 1
-Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable girivinity
-sudo systemctl start girivinity
-sudo systemctl status girivinity
-```
-
----
-
-## Development Guide
-
-### Run tests
-```bash
-pytest -q                          # all tests
-pytest tests/test_architecture.py  # specific file
-pytest -k "test_kb_hit"            # specific test
-```
-
-### Lint
-```bash
-ruff check .
-```
-
-### Watch self-training logs
-```bash
-tail -f logs/self_training.jsonl | python -m json.tool
-```
-
-### Watch for successor model notifications
-```bash
-tail -f logs/admin_notifications.jsonl | python -m json.tool
-```
-
-### Submit user feedback (to influence successor triggers)
-```bash
-curl -X POST http://localhost:8000/admin/feedback \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "user123", "score": 4.5}'
-```
-
-### Manually approve a successor model
-```bash
-# List available versions
-curl http://localhost:8000/admin/model-versions
-
-# Approve a specific version
-curl -X POST http://localhost:8000/admin/approve-successor/20240101_120000
-```
-
----
-
-## Configuration Reference
-
-All configuration lives in `config.yaml`. Key sections:
-
-```yaml
-modules:
-  self_training:
-    interval_seconds: 1800        # Check queue every 30 minutes
-    chunk_threshold: 50           # Min chunks before LoRA fires
-    base_model_path: models/base  # Where trained base model lives
-    adapters_dir: models/adapters # Where LoRA adapters are saved
-    epochs: 3
-    learning_rate: 0.0002
-    loss_abort_threshold: 2.0     # Abort LoRA if loss exceeds this
-
-successor_engine:
-  check_interval_seconds: 86400  # Check every 24 hours
-  knowledge_base_threshold: 100000  # Chunks before full retrain
-  quality_score_threshold: 3.5   # Avg feedback below this triggers
-  versions_dir: models/versions
-  notifications_path: logs/admin_notifications.jsonl
-
-rag:
-  chroma_path: data/chroma
-
-architecture:
-  dim: 1024
-  n_layers: 16
-  n_heads: 16
-  n_kv_heads: 4
-  vocab_size: 32000
-  max_seq_len: 4096
-```
-
----
-
-## Roadmap
-
-- [ ] Admin web dashboard (approve successors via UI)
-- [ ] Hindi and regional Indian language support
-- [ ] Multi-GPU training for successor models
-- [ ] Streaming successor training progress via WebSocket
-- [ ] Domain-specific knowledge packs (medical, legal, engineering)
-- [ ] Mobile API client
-- [ ] Rate limiting and user authentication layer
-- [ ] Distributed ChromaDB for horizontal scaling
-
----
-
-## License
-
-Built in India. Open for the world.

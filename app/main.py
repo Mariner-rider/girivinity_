@@ -23,6 +23,7 @@ from app.api.routes.cuda import router as cuda_router
 from app.security.cyber_shield import CyberShieldMiddleware
 from app.api.routes.security import router as security_router
 from app.api.routes.tenant_security import router as tenant_security_router
+from app.api.routes.agents import router as agents_router
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ app.include_router(skills_router)
 app.include_router(cuda_router)
 app.include_router(security_router)
 app.include_router(tenant_security_router)
+app.include_router(agents_router)
 
 
 def _start_self_trainer_once() -> None:
