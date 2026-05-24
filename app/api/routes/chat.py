@@ -53,6 +53,19 @@ async def chat_message(req: ChatRequest):
             detail="Request could not be processed",
         )
 
+    # Agent mode check
+    from app.core.agent_orchestrator import AgentOrchestrator
+
+    orchestrator = AgentOrchestrator()
+    if orchestrator.is_agent_request(req.query):
+        agent_result = orchestrator.orchestrate(req.query, req.user_id)
+        return ChatResponse(
+            answer=agent_result.output or "Agent completed with no output.",
+            source="agent",
+            confidence=0.9 if agent_result.success else 0.3,
+            urls=[s.get("url", "") for s in agent_result.sources[:3]],
+        )
+
     # 1 — Analyse sentiment (silent)
     sentiment = SentimentEngine().analyse(req.query, req.user_id)
 
@@ -151,6 +164,19 @@ async def chat_message_stream(req: ChatRequest):
         raise HTTPException(
             status_code=400,
             detail="Request could not be processed",
+        )
+
+    # Agent mode check
+    from app.core.agent_orchestrator import AgentOrchestrator
+
+    orchestrator = AgentOrchestrator()
+    if orchestrator.is_agent_request(req.query):
+        agent_result = orchestrator.orchestrate(req.query, req.user_id)
+        return ChatResponse(
+            answer=agent_result.output or "Agent completed with no output.",
+            source="agent",
+            confidence=0.9 if agent_result.success else 0.3,
+            urls=[s.get("url", "") for s in agent_result.sources[:3]],
         )
 
     try:
