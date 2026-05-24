@@ -266,3 +266,22 @@ cyber_shield:
   contain_threshold:  0.9
   emergency_auto:     true
   log_clean_requests: false
+
+
+agent_mode:
+  agents_dir: data/agents
+  similarity_threshold: 0.5
+  max_steps_per_agent: 10
+  learn_from_results: true
+
+
+rasp:
+  check_interval_seconds: 30
+  enable_runtime_interceptor: true
+  enable_process_scan: true
+  enable_integrity_check: true
+  cpu_spike_threshold: 85.0
+  memory_high_threshold: 80.0
+  disk_write_threshold: 50.0
+  net_sent_threshold: 100.0
+  connections_threshold: 500
