@@ -24,6 +24,8 @@ from app.security.cyber_shield import CyberShieldMiddleware
 from app.api.routes.security import router as security_router
 from app.api.routes.tenant_security import router as tenant_security_router
 from app.api.routes.agents import router as agents_router
+from app.api.routes.rasp import router as rasp_router
+from app.security.rasp.rasp_engine import RASPEngine
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,7 @@ app.include_router(cuda_router)
 app.include_router(security_router)
 app.include_router(tenant_security_router)
 app.include_router(agents_router)
+app.include_router(rasp_router)
 
 
 def _start_self_trainer_once() -> None:
@@ -115,3 +118,8 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     close_pool()
+
+
+@app.on_event("startup")
+async def start_rasp():
+    RASPEngine.start()
