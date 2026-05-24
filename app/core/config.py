@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     structured_logging: bool = Field(default=True, alias="STRUCTURED_LOGGING")
     auto_load_model: bool = Field(default=False, alias="AUTO_LOAD_MODEL")
 
-    model_id: str = Field(default="TinyLlama/TinyLlama-1.1B-Chat-v1.0", alias="MODEL_ID")
+    model_id: str = Field(default="GirivinityModel/GirivinityModel-1.1B-Chat-v1.0", alias="MODEL_ID")
     model_device_map: str = Field(default="auto", alias="MODEL_DEVICE_MAP")
     model_load_in_4bit: bool = Field(default=True, alias="MODEL_LOAD_IN_4BIT")
     model_use_double_quant: bool = Field(default=True, alias="MODEL_USE_DOUBLE_QUANT")
