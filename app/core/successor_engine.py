@@ -9,6 +9,8 @@ from pathlib import Path
 
 import yaml
 
+from app.core.model_generation_policy import GenerationPolicy
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,6 +54,7 @@ class SuccessorEngine:
         self.active_link = Path(se.get("active_model_symlink", "models/active"))
         self.auto_quantize = bool(se.get("auto_quantize", True))
         self.quant_type = str(se.get("quant_type", "Q4_K_M"))
+        self.generation_policy = GenerationPolicy()
 
     @classmethod
     def start(cls) -> multiprocessing.Process:
@@ -135,6 +138,12 @@ class SuccessorEngine:
             reason.append(f"kb_chunks={kb_count}>={self.kb_threshold}")
         if quality_trigger:
             reason.append(f"quality={avg_score:.2f}<{self.quality_threshold}")
+        next_generation = self.generation_policy.get_next_generation()
+        if self.generation_policy._is_extrapolated(next_generation):
+            logger.info(
+                "Beyond defined roadmap — extrapolating next generation: %s",
+                next_generation.name,
+            )
         logger.info("SuccessorEngine triggered: %s", ", ".join(reason))
 
         self._build_successor()

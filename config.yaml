@@ -209,6 +209,7 @@ self_training:
 
 
 successor_engine:
+  current_generation: 1  # Generation 1 is now Girivinity-3B
   check_interval_seconds: 86400
   chunk_threshold: 100000
   quality_threshold: 3.5

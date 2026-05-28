@@ -48,14 +48,15 @@ within this codebase.
 3. [System Architecture](#system-architecture)
 4. [How Self-Learning Works](#how-self-learning-works)
 5. [How Successor Models Work](#how-successor-models-work)
-6. [Repository Structure](#repository-structure)
-7. [Component Reference](#component-reference)
-8. [API Reference](#api-reference)
-9. [Deployment Guide — Step by Step](#deployment-guide)
-10. [Development Guide](#development-guide)
-11. [Configuration Reference](#configuration-reference)
-12. [Serving the API to Others](#serving-the-api-to-others)
-13. [Roadmap](#roadmap)
+6. [Model Generation Roadmap](#model-generation-roadmap)
+7. [Repository Structure](#repository-structure)
+8. [Component Reference](#component-reference)
+9. [API Reference](#api-reference)
+10. [Deployment Guide — Step by Step](#deployment-guide)
+11. [Development Guide](#development-guide)
+12. [Configuration Reference](#configuration-reference)
+13. [Serving the API to Others](#serving-the-api-to-others)
+14. [Roadmap](#roadmap)
 
 ---
 
@@ -66,7 +67,7 @@ the response. Girivinity is not that.
 
 **It owns its own model.** The GirivinityModel is a decoder-only transformer
 built from scratch in PyTorch — RMSNorm, Rotary Position Embeddings, Grouped
-Query Attention, SwiGLU feed-forward, weight-tied LM head. ~360M parameters.
+Query Attention, SwiGLU feed-forward, weight-tied LM head. The model family starts at 3B parameters (Girivinity-3B), scaling to 70B and beyond through the structured generation roadmap.
 Quantised to Q4_K_M GGUF for CPU inference on a standard VPS.
 
 **It learns while it runs.** Every query that misses the knowledge base
@@ -211,6 +212,30 @@ Every generation upgrade requires one human confirmation.
 
 Each successor model has measurably lower perplexity than its predecessor.
 The improvement percentage is included in the notification.
+
+---
+
+
+## Model Generation Roadmap
+
+| Generation | Model | Target Parameters | Architecture Direction |
+|---|---|---:|---|
+| 1 | Girivinity-3B | 3B | First production-scale native Girivinity generation |
+| 2 | Girivinity-7B | 7B | Larger general-purpose model with stronger reasoning |
+| 3 | Girivinity-13B | 13B | Higher-capacity reasoning and multilingual depth |
+| 4 | Girivinity-34B | 34B | Large-scale expert generation for complex domains |
+| 5 | Girivinity-70B | 70B | Last explicitly defined, hand-tuned generation |
+
+### The Roadmap Never Ends
+
+Generations 1–5 are explicitly defined with hand-tuned architectures.
+Beyond Generation 5 (Girivinity-70B), the system automatically extrapolates
+the next generation by doubling parameters and scaling the architecture proportionally.
+
+There is no ceiling. Girivinity is designed to keep growing as long as
+data and compute are available. Each generation is twice as capable as the last.
+
+The question is never "when do we stop?" — it is always "what does the next generation need?"
 
 ---
 
@@ -471,8 +496,7 @@ never auto-deploys.
 ### GirivinityModel — `app/llm/girivinity_architecture.py`
 Custom decoder-only transformer. PyTorch only — no HuggingFace.
 Components: RMSNorm, RoPE, Grouped Query Attention (16 heads,
-4 KV heads), SwiGLU FFN, weight-tied LM head. ~360M parameters
-at full config. KV-cache supported for fast autoregressive
+4 KV heads), SwiGLU FFN, weight-tied LM head. The model family starts at 3B parameters (Girivinity-3B), scaling to 70B and beyond through the structured generation roadmap. KV-cache supported for fast autoregressive
 inference. Quantised to Q4_K_M GGUF via llama.cpp for CPU
 inference on 4GB RAM.
 
@@ -727,7 +751,7 @@ model:
   quantised_path: models/girivinity_quantised/model.gguf
   n_ctx: 4096
   n_threads: 3        # cpu_count - 1
-  n_gpu_layers: 0     # 0 = CPU only
+  n_gpu_layers: 0     # 0 = CPU fallback for GGUF inference
 
 training:
   queue_db: data/training.db
@@ -1007,6 +1031,8 @@ async def chat(request: Request, ...):
 
 - [ ] Admin web dashboard (approve successors via UI)
 - [ ] Hindi and regional Indian language support
+- [ ] Girivinity-7B training run (Generation 2)
+- [ ] Girivinity-13B training run (Generation 3)
 - [ ] Multi-GPU training for successor models
 - [ ] Streaming successor training progress via WebSocket
 - [ ] Domain-specific knowledge packs (medical, legal, engineering)
