@@ -52,6 +52,29 @@ training:
   max_training_epochs: 1
   require_validation_dataset: true
   require_benchmark_improvement: true
+  pretrain:
+    data_path: "data/distillation/output.jsonl"
+    output_dir: "models/girivinity_pretrain"
+    batch_size: 2
+    learning_rate: 0.0003
+    warmup_steps: 100
+    max_steps: 1000
+    gradient_accumulation_steps: 8
+    checkpoint_every: 100
+    use_amp: true
+    use_fsdp: false
+    model_config:
+      vocab_size: 65536
+      hidden_dim: 2048
+      num_heads: 16
+      num_layers: 24
+      ffn_dim: 8192
+      max_seq_len: 4096
+      dropout: 0.1
+      use_rope: true
+      use_gqa: true
+      num_kv_heads: 4
+      use_rmsnorm: true
 
 security:
   require_grounding: true
