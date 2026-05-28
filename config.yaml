@@ -8,7 +8,7 @@ app:
   auto_load_model: false
 
 model:
-  model_id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+  model_id: "models/base"
   device_map: "auto"
   torch_dtype: "float16"
   load_in_4bit: true
@@ -18,17 +18,15 @@ model:
   n_ctx: 4096
   n_gpu_layers: 0
   architecture:
-    dim: 1024
-    n_layers: 16
-    n_heads: 16
-    n_kv_heads: 4
-    vocab_size: 32000
-    max_seq_len: 4096
-    ffn_multiplier: 2.667
-  quantisation:
-    input_model_path: "models/gguf/girivinity-f16.gguf"
-    output_model_path: "models/gguf/girivinity-q4_k_m.gguf"
-    quantization: "Q4_K_M"
+  dim: 3072
+  n_layers: 28
+  n_heads: 24
+  n_kv_heads: 8
+  vocab_size: 32000
+  max_seq_len: 4096
+  ffn_multiplier: 2.667
+  norm_eps: 0.00001
+  rope_theta: 500000.0
 
 rag:
   chroma_path: "data/chroma"
@@ -70,7 +68,7 @@ modules:
     config_source: "config.yaml"
   llm:
     enabled: true
-    model_id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    model_id: "models/base"
     device_map: "auto"
     trust_remote_code: false
     attn_implementation: "sdpa"
