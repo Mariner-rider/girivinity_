@@ -8,6 +8,10 @@ app:
   auto_load_model: false
 
 model:
+  # Set true to load GirivinityModel from app/llm/girivinity_architecture.py instead of HuggingFace.
+  use_native_model: false
+  # Path to a saved GirivinityModel checkpoint directory (config.json + pytorch_model.bin + tokenizer.json).
+  native_model_path: ""
   model_id: "models/base"
   device_map: "auto"
   torch_dtype: "float16"
