@@ -1,4 +1,4 @@
-from tool_selection_engine import ToolSelectionEngine
+from app.engines.tool_selection_engine import ToolSelectionEngine
 
 
 def test_selects_api_call_for_realtime_queries():

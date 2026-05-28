@@ -116,7 +116,7 @@ class SelfTrainer:
         if not self.base_model.exists():
             logger.warning(
                 "Base model not found at %s — skipping. "
-                "Build it first with: python model/architecture.py",
+                "Build it first with: python -m app.training.pretrain --config config.yaml",
                 self.base_model,
             )
             return False

@@ -222,6 +222,7 @@ class GirivinityModel(nn.Module):
         self.final_norm = norm_cls(config.hidden_dim)
         self.lm_head = nn.Linear(config.hidden_dim, config.vocab_size, bias=False)
         self.lm_head.weight = self.embed_tokens.weight
+        self.gradient_checkpointing = False
         self.apply(self._init_weights)
 
     @classmethod
@@ -236,12 +237,34 @@ class GirivinityModel(nn.Module):
     ) -> tuple[Tensor, list[tuple[Tensor, Tensor]]]:
         hidden_states = self.embed_tokens(input_ids)
         next_key_values = []
+        use_gradient_checkpointing = (
+            self.gradient_checkpointing
+            and self.training
+            and past_key_values is None
+        )
         for idx, layer in enumerate(self.layers):
             past = past_key_values[idx] if past_key_values is not None else None
+            if use_gradient_checkpointing:
+                from torch.utils.checkpoint import checkpoint
+
+                def custom_forward(
+                    states: Tensor,
+                    checkpointed_layer: GirivinityDecoderLayer = layer,
+                ) -> Tensor:
+                    return checkpointed_layer(states, attention_mask, None)[0]
+
+                hidden_states = checkpoint(custom_forward, hidden_states, use_reentrant=False)
+                continue
             hidden_states, present = layer(hidden_states, attention_mask, past)
             next_key_values.append(present)
         logits = self.lm_head(self.final_norm(hidden_states))
         return logits, next_key_values
+
+    def gradient_checkpointing_enable(self) -> None:
+        self.gradient_checkpointing = True
+
+    def gradient_checkpointing_disable(self) -> None:
+        self.gradient_checkpointing = False
 
     @torch.no_grad()
     def generate(

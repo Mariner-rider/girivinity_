@@ -1,4 +1,4 @@
-from context_optimization_engine import ContextChunk, ContextOptimizationSystem
+from app.engines.context_optimization_engine import ContextChunk, ContextOptimizationSystem
 
 
 def test_context_optimization_ranks_compresses_and_removes_noise():
