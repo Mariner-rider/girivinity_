@@ -1,4 +1,4 @@
-from instruction_following_engine import InstructionFollowingEngine, ResponseGenerator
+from app.engines.instruction_following_engine import InstructionFollowingEngine, ResponseGenerator
 
 
 class FlakyGenerator(ResponseGenerator):

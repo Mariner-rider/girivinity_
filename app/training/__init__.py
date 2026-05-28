@@ -6,6 +6,8 @@ __all__ = [
     "LoRATrainer",
     "LoRATrainingConfig",
     "evaluate_adapter",
+    "PretrainConfig",
+    "GirivinityPretrainer",
 ]
 
 
@@ -14,4 +16,8 @@ def __getattr__(name: str):
         import app.finetune as finetune
 
         return getattr(finetune, name)
+    if name in {"PretrainConfig", "GirivinityPretrainer"}:
+        import app.training.pretrain as pretrain
+
+        return getattr(pretrain, name)
     raise AttributeError(name)

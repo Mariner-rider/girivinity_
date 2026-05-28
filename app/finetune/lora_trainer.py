@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import torch
@@ -8,6 +9,8 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
 
 from app.security.policy import SecurityGuard, secure_operation
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -50,6 +53,13 @@ class LoRATrainer:
 
     @secure_operation("finetune.lora_train")
     def train(self) -> str:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        on_gpu = device.type == "cuda"
+        if on_gpu:
+            logger.info("Training on GPU: %s", torch.cuda.get_device_name(0))
+        else:
+            logger.info("Training on CPU — this will be slow, consider a GPU instance")
+
         self.security_guard.require_validation_dataset(self.config.validation_dataset_path)
         tokenizer = AutoTokenizer.from_pretrained(self.config.model_id)
         if tokenizer.pad_token is None:
@@ -57,9 +67,12 @@ class LoRATrainer:
 
         base_model = AutoModelForCausalLM.from_pretrained(
             self.config.model_id,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
-        )
+            torch_dtype=torch.float16 if on_gpu else torch.float32,
+            device_map=None,
+        ).to(device)
+
+        scaler = torch.cuda.amp.GradScaler(enabled=on_gpu)
+        _ = scaler
 
         peft_cfg = LoraConfig(
             r=self.config.lora_r,
@@ -68,7 +81,7 @@ class LoRATrainer:
             target_modules=["q_proj", "v_proj"],
             task_type="CAUSAL_LM",
         )
-        model = get_peft_model(base_model, peft_cfg)
+        model = get_peft_model(base_model, peft_cfg).to(device)
 
         ds = load_dataset("json", data_files=self.config.dataset_path, split="train")
         val_ds = load_dataset("json", data_files=self.config.validation_dataset_path, split="train")
@@ -87,8 +100,10 @@ class LoRATrainer:
             logging_steps=10,
             save_strategy="epoch",
             eval_strategy="epoch",
-            fp16=torch.cuda.is_available(),
+            fp16=on_gpu,
             bf16=False,
+            dataloader_num_workers=4 if on_gpu else 0,
+            no_cuda=not on_gpu,
             report_to=[],
         )
 
@@ -98,7 +113,11 @@ class LoRATrainer:
             train_dataset=tokenized,
             eval_dataset=tokenized_val,
         )
-        trainer.train()
-        model.save_pretrained(self.config.output_dir)
-        tokenizer.save_pretrained(self.config.output_dir)
-        return self.config.output_dir
+        try:
+            trainer.train()
+            model.save_pretrained(self.config.output_dir)
+            tokenizer.save_pretrained(self.config.output_dir)
+            return self.config.output_dir
+        finally:
+            if on_gpu:
+                torch.cuda.empty_cache()
