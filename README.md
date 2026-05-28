@@ -85,7 +85,7 @@ and attached web sources. Unverified claims are flagged. Confidence is
 scored 0.0–1.0. Citations only appear for URLs that actually exist in
 the current session's retrieved data.
 
-**It runs on low compute.** Inference runs CPU-only on a 4GB VPS.
+**It runs on low compute.** Runs on both GPU and CPU — automatically. When a GPU is present, inference uses 4-bit NF4 quantization (BitsAndBytes) for maximum speed at minimum VRAM cost. When no GPU is available, it falls back to CPU float32 inference on as little as 4GB RAM. Same codebase, same config, zero changes needed.
 LoRA fine-tuning triggers on demand on the cheapest GPU instance available
 (Lambda Labs T4, ~$0.35/hour). Full successor retraining runs once every
 few months automatically.
@@ -200,6 +200,7 @@ When either triggers:
 3. Perplexity evaluated on held-out sample
 4. If new model perplexity is lower (better) than current:
    - Saved to `models/versions/{timestamp}/`
+   - Automatically quantized to Q4_K_M GGUF at `models/versions/{timestamp}/model.gguf` for CPU inference
    - Notification written to `logs/admin_notifications.jsonl`
    - Status: `awaiting_admin_approval`
 5. Admin calls `POST /admin/approve-successor/{version}`
@@ -500,6 +501,7 @@ Response: { "notifications": [
   { "type": "successor_ready", "version": "20240101_120000",
     "previous_version": "none", "improvement_percent": 12.5,
     "trained_on_chunks": 105000, "perplexity": 38.4,
+    "quantization_status": "quantized",
     "timestamp": "ISO8601", "status": "awaiting_admin_approval" }
 ]}
 ```
@@ -529,7 +531,7 @@ Response: { "status": "recorded" }
 
 **GET /health** → `{ "status": "ok", "service": "girivinity" }`
 
-**GET /health/deep** → `{ "status": "ok|degraded", "issues": [] }`
+**GET /health/deep** → `{ "status": "ok|degraded", "issues": [], "compute": { ... } }`
 
 ---
 
@@ -537,13 +539,40 @@ Response: { "status": "recorded" }
 
 ### Requirements
 
-| Resource | Minimum | Recommended |
-|----------|---------|-------------|
+| Resource | Minimum (CPU mode) | Recommended (GPU mode) |
+|---|---|---|
 | RAM | 4 GB | 8 GB |
 | CPU | 2 cores | 4 cores |
 | Storage | 20 GB | 40 GB |
+| GPU | Not required | 6GB+ VRAM (RTX 3060 or better) |
 | OS | Ubuntu 22.04 | Ubuntu 22.04 |
-| GPU | Not required | Optional (speeds training) |
+
+### GPU vs CPU Mode
+
+Girivinity detects your hardware automatically at startup. You never need to change config.
+
+| Operation | CPU Mode | GPU Mode |
+|---|---|---|
+| Inference | float32, slower | 4-bit NF4 quantized, 5-10x faster |
+| LoRA fine-tuning | Runs, takes longer | AMP float16, much faster |
+| Pretraining | Possible but slow | Recommended, use gradient checkpointing |
+| Successor retraining | Hours to days | Minutes to hours |
+| Min RAM / VRAM | 4GB RAM | 6GB VRAM |
+| Cost | Free (any VPS) | ~$0.35/hr (Lambda Labs T4) |
+
+**To force CPU mode** (e.g. for testing):
+```yaml
+# config.yaml
+compute:
+  device: "cpu"
+```
+
+**To verify which mode is active:**
+```bash
+curl http://localhost:8000/health/deep
+# Returns: "compute": {"device": "cuda", "gpu_name": "...", "inference_mode": "4bit_nf4_gpu"}
+# Or:      "compute": {"device": "cpu", "inference_mode": "float32_cpu"}
+```
 
 ---
 

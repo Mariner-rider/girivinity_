@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 from app.security.policy import SecurityGuard, secure_operation
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -71,6 +74,23 @@ class ModelEvolutionSystem:
         finetune_candidate_fn,
         benchmark_fn,
     ) -> EvolutionResult:
+        try:
+            import torch
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            on_gpu = device.type == "cuda"
+            if on_gpu:
+                logger.info("Training on GPU: %s", torch.cuda.get_device_name(0))
+                scaler = torch.cuda.amp.GradScaler()
+                _ = scaler
+            else:
+                logger.info("Training on CPU — this will be slow, consider a GPU instance")
+        except ModuleNotFoundError:
+            torch = None
+            device = "cpu"
+            on_gpu = False
+            logger.info("Training on CPU — this will be slow, consider a GPU instance")
+
         # 1) evaluate current model
         baseline = evaluate_current_fn()
 
@@ -81,7 +101,10 @@ class ModelEvolutionSystem:
         tasks = self.generate_training_tasks(weaknesses)
 
         # 4) fine-tune candidate model (parameter-efficient expected by caller)
-        candidate_model_ref = finetune_candidate_fn(tasks)
+        try:
+            candidate_model_ref = finetune_candidate_fn(tasks, device=device)
+        except TypeError:
+            candidate_model_ref = finetune_candidate_fn(tasks)
 
         # 5) benchmark vs previous
         candidate = benchmark_fn(candidate_model_ref)
@@ -94,7 +117,7 @@ class ModelEvolutionSystem:
                 f"hallucination={candidate.hallucination_rate} (baseline={baseline.hallucination_rate})"
             )
             self.notifier.send("Model evolution blocked. " + raise_message)
-            return EvolutionResult(
+            result = EvolutionResult(
                 weaknesses=weaknesses,
                 training_tasks=tasks,
                 baseline=baseline,
@@ -102,12 +125,15 @@ class ModelEvolutionSystem:
                 deployed=False,
                 notification_message=self.notifier.sent_messages[-1],
             )
+            if on_gpu and torch is not None:
+                torch.cuda.empty_cache()
+            return result
 
         self.notifier.send(
             f"Model deployed successfully: accuracy {baseline.accuracy:.3f}->{candidate.accuracy:.3f}, "
             f"hallucination {baseline.hallucination_rate:.3f}->{candidate.hallucination_rate:.3f}."
         )
-        return EvolutionResult(
+        result = EvolutionResult(
             weaknesses=weaknesses,
             training_tasks=tasks,
             baseline=baseline,
@@ -115,3 +141,6 @@ class ModelEvolutionSystem:
             deployed=True,
             notification_message=self.notifier.sent_messages[-1],
         )
+        if on_gpu and torch is not None:
+            torch.cuda.empty_cache()
+        return result

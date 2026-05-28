@@ -27,6 +27,11 @@ class LLMEngine:
         self.model: Any | None = None
         self.tokenizer: Any | None = None
         self.use_native_model = self.config.use_native_model
+        requested_device = self._requested_compute_device()
+        if requested_device == "cuda" and not self._cuda_available():
+            raise RuntimeError("compute.device is 'cuda' but CUDA is not available")
+        self.used_gpu = requested_device != "cpu" and self._cuda_available()
+        self.device = "cuda" if self.used_gpu else "cpu"
         self._loaded = False
 
     def load(self) -> "LLMEngine":
@@ -34,8 +39,33 @@ class LLMEngine:
         self.model = loaded.model
         self.tokenizer = loaded.tokenizer
         self.use_native_model = loaded.use_native_model
+        self._configure_device()
         self._loaded = True
         return self
+
+    def get_device_info(self) -> dict[str, Any]:
+        try:
+            import torch
+
+            if self.used_gpu and torch.cuda.is_available():
+                return {
+                    "device": "cuda",
+                    "gpu_name": torch.cuda.get_device_name(0),
+                    "gpu_vram_total_gb": round(
+                        torch.cuda.get_device_properties(0).total_memory / 1e9, 1
+                    ),
+                    "gpu_vram_free_gb": round(torch.cuda.mem_get_info()[0] / 1e9, 1),
+                    "inference_mode": "4bit_nf4_gpu",
+                }
+        except Exception as exc:
+            logger.debug("Unable to read CUDA device info: %s", exc)
+        return {
+            "device": "cpu",
+            "gpu_name": None,
+            "gpu_vram_total_gb": None,
+            "gpu_vram_free_gb": None,
+            "inference_mode": "float32_cpu",
+        }
 
     def generate(
         self,
@@ -79,7 +109,7 @@ class LLMEngine:
             raise RuntimeError("Native model and tokenizer must be loaded before generation")
 
         encoded = self.tokenizer(prompt, return_tensors="pt")
-        input_ids = encoded["input_ids"]
+        input_ids = self._move_tensor_to_model_device(encoded["input_ids"])
         output_ids = self.model.generate(
             input_ids,
             max_new_tokens=max_tokens,
@@ -109,15 +139,70 @@ class LLMEngine:
         return self.tokenizer.decode(completion_ids[0], skip_special_tokens=True)
 
     def _move_inputs_to_model_device(self, encoded: dict[str, Any]) -> dict[str, Any]:
-        if self.model is None:
-            return encoded
-        device = getattr(self.model, "device", None)
-        if device is None:
-            return encoded
         return {
-            key: value.to(device) if hasattr(value, "to") else value
+            key: self._move_tensor_to_model_device(value) if hasattr(value, "to") else value
             for key, value in encoded.items()
         }
+
+    def _move_tensor_to_model_device(self, value: Any) -> Any:
+        if self.model is None or not hasattr(value, "to"):
+            return value
+        device = self._model_device()
+        return value.to(device) if device is not None else value
+
+    def _configure_device(self) -> None:
+        if self.model is None:
+            return
+        try:
+            import torch
+
+            requested_device = self._requested_compute_device()
+            if requested_device == "cuda" and not torch.cuda.is_available():
+                raise RuntimeError("compute.device is 'cuda' but CUDA is not available")
+            target_device = torch.device(
+                "cuda" if requested_device != "cpu" and torch.cuda.is_available() else "cpu"
+            )
+            if self.use_native_model:
+                self.model.to(target_device)
+            model_device = self._model_device()
+            self.used_gpu = bool(model_device and str(model_device).startswith("cuda"))
+            self.device = "cuda" if self.used_gpu else "cpu"
+        except Exception as exc:
+            logger.debug("Model device configuration failed; using CPU metadata: %s", exc)
+            self.used_gpu = False
+            self.device = "cpu"
+
+    def _model_device(self) -> Any | None:
+        if self.model is None:
+            return None
+        device = getattr(self.model, "device", None)
+        if device is not None:
+            return device
+        try:
+            return next(self.model.parameters()).device
+        except Exception:
+            return None
+
+    @staticmethod
+    def _requested_compute_device() -> str:
+        try:
+            from pathlib import Path
+
+            import yaml
+
+            cfg = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8")) or {}
+            return str((cfg.get("compute", {}) or {}).get("device", "auto"))
+        except Exception:
+            return "auto"
+
+    @staticmethod
+    def _cuda_available() -> bool:
+        try:
+            import torch
+
+            return torch.cuda.is_available()
+        except Exception:
+            return False
 
     def _ensure_loaded(self) -> None:
         if not self._loaded:

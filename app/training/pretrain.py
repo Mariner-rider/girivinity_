@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import time
 from dataclasses import asdict, dataclass, is_dataclass
@@ -21,6 +22,8 @@ from torch.utils.data import DataLoader, Dataset, random_split
 from app.llm.girivinity_architecture import GirivinityConfig, GirivinityModel
 from app.llm.girivinity_tokenizer import GirivinityTokenizer
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(slots=True)
 class PretrainConfig:
@@ -35,6 +38,7 @@ class PretrainConfig:
     output_dir: str
     use_amp: bool = True
     use_fsdp: bool = False
+    device: str = "auto"
 
     def __post_init__(self) -> None:
         if self.batch_size < 1:
@@ -70,6 +74,7 @@ class PretrainConfig:
             output_dir=str(pretrain["output_dir"]),
             use_amp=bool(pretrain.get("use_amp", True)),
             use_fsdp=bool(pretrain.get("use_fsdp", False)),
+            device=str(pretrain.get("device", raw.get("compute", {}).get("device", "auto"))),
         )
 
 
@@ -102,7 +107,9 @@ class _PackedTokenDataset(Dataset[dict[str, Tensor]]):
 class GirivinityPretrainer:
     def __init__(self, config: PretrainConfig) -> None:
         self.config = config
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = _resolve_device(config.device)
+        self.on_gpu = self.device.type == "cuda"
+        _log_device(self.on_gpu)
         self.model = GirivinityModel(config.model_config)
         self.model.gradient_checkpointing_enable()
         self.model.to(self.device)
@@ -138,17 +145,22 @@ class GirivinityPretrainer:
             train_dataset = dataset
             val_dataset = dataset
 
+        num_workers = 4 if self.on_gpu else 0
         self.train_loader = DataLoader(
             train_dataset,
             batch_size=self.config.batch_size,
             shuffle=True,
             drop_last=False,
+            num_workers=num_workers,
+            pin_memory=self.on_gpu,
         )
         self.val_loader = DataLoader(
             val_dataset,
             batch_size=self.config.batch_size,
             shuffle=False,
             drop_last=False,
+            num_workers=num_workers,
+            pin_memory=self.on_gpu,
         )
         return self.train_loader
 
@@ -156,7 +168,9 @@ class GirivinityPretrainer:
         train_loader = self.train_loader or self.load_data()
         optimizer = AdamW(self.model.parameters(), lr=self.config.learning_rate)
         scheduler = LambdaLR(optimizer, lr_lambda=self._lr_multiplier)
-        amp_enabled = self.config.use_amp and self.device.type == "cuda"
+        device = self.device
+        on_gpu = device.type == "cuda"
+        amp_enabled = self.config.use_amp and on_gpu
         scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
         self.model.train()
@@ -204,6 +218,8 @@ class GirivinityPretrainer:
             if optimizer_step >= self.config.max_steps:
                 if not checkpoint_saved:
                     self._save_checkpoint(optimizer_step)
+                if on_gpu:
+                    torch.cuda.empty_cache()
                 return
 
     @torch.no_grad()
@@ -308,6 +324,23 @@ class GirivinityPretrainer:
     @staticmethod
     def _unwrap_model(model: torch.nn.Module) -> GirivinityModel:
         return model.module if hasattr(model, "module") else model  # type: ignore[return-value]
+
+
+def _resolve_device(requested: str = "auto") -> torch.device:
+    if requested == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if requested == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("compute.device is 'cuda' but CUDA is not available")
+    if requested not in {"cpu", "cuda"}:
+        raise ValueError(f"Unsupported device: {requested}")
+    return torch.device(requested)
+
+
+def _log_device(on_gpu: bool) -> None:
+    if on_gpu:
+        logger.info("Training on GPU: %s", torch.cuda.get_device_name(0))
+    else:
+        logger.info("Training on CPU — this will be slow, consider a GPU instance")
 
 
 def _iter_jsonl_texts(data_path: str | Path) -> Iterable[str]:

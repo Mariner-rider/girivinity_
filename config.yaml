@@ -36,6 +36,31 @@ model:
 rag:
   chroma_path: "data/chroma"
 
+compute:
+  # Auto-detects GPU at runtime. Set to "cpu" to force CPU-only mode.
+  # Set to "cuda" to require GPU (will error if not available).
+  device: "auto"
+
+  # Training settings per device type
+  training:
+    gpu:
+      use_amp: true              # Mixed precision (float16) on GPU
+      dataloader_num_workers: 4  # Parallel data loading on GPU
+      gradient_checkpointing: true
+    cpu:
+      use_amp: false             # AMP disabled on CPU
+      dataloader_num_workers: 0  # No multiprocessing on CPU
+      gradient_checkpointing: true  # Still useful to save RAM on CPU
+
+  # Inference settings
+  inference:
+    gpu:
+      load_in_4bit: true         # 4-bit NF4 quantization on GPU
+      torch_dtype: "float16"
+    cpu:
+      load_in_4bit: false        # No 4-bit on CPU (use GGUF instead)
+      torch_dtype: "float32"
+
 crawler:
   max_depth: 2
   concurrent_requests: 32
@@ -64,6 +89,7 @@ training:
     checkpoint_every: 100
     use_amp: true
     use_fsdp: false
+    device: "auto"
     model_config:
       vocab_size: 65536
       hidden_dim: 2048
@@ -200,7 +226,9 @@ successor_engine:
   learning_rate: 0.0002
   train_seq_len: 256
   eval_split: 0.1
-  device: "cpu"
+  device: "auto"
+  auto_quantize: true        # Quantize successor to GGUF after training
+  quant_type: "Q4_K_M"      # Quantization format for CPU inference
 
 
 skill_forge:
