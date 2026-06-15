@@ -2,7 +2,7 @@ from __future__ import annotations
 import logging
 from typing import Iterator
 
-from llm_loader import GirivinityLoader
+from llm_loader import GirivinityLoader, LLMEngineConfig
 
 logger = logging.getLogger(__name__)
 

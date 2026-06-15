@@ -2,7 +2,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from inter_model_protocol import DelegatedTask, InterModelCommunicationProtocol, ModelEndpoint
+from app.engines.inter_model_protocol import DelegatedTask, InterModelCommunicationProtocol, ModelEndpoint
 
 
 class Handler(BaseHTTPRequestHandler):

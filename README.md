@@ -393,6 +393,27 @@ Response: { "status": "recorded" }
 
 ### Step 1 — Clone and install
 
+### GPU vs CPU Mode
+
+Girivinity detects your hardware automatically at startup. You never need to change config.
+
+| Operation | CPU Mode | GPU Mode |
+|---|---|---|
+| Inference | float32, slower | 4-bit NF4 quantized, 5-10x faster |
+| LoRA fine-tuning | Runs, takes longer | AMP float16, much faster |
+| Pretraining | Possible but slow | Recommended, use gradient checkpointing |
+| Successor retraining | Hours to days | Minutes to hours |
+| Min RAM / VRAM | 4GB RAM | 6GB VRAM |
+| Cost | Free (any VPS) | ~$0.35/hr (Lambda Labs T4) |
+
+**To force CPU mode** (e.g. for testing):
+```yaml
+# config.yaml
+compute:
+  device: "cpu"
+```
+
+**To verify which mode is active:**
 ```bash
 git clone https://github.com/Mariner-rider/girivinity_
 cd girivinity_
@@ -624,6 +645,7 @@ StandardError=journal
 WantedBy=multi-user.target
 ```
 
+### Watch for successor model notifications
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable girivinity
