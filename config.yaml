@@ -175,3 +175,18 @@ successor_engine:
   train_seq_len: 256
   eval_split: 0.1
   device: "cpu"
+
+
+skill_forge:
+  skills_dir: skills
+  db_path: data/skill_forge.db
+  min_chunks_to_generate: 3
+  max_skills_composed: 3
+
+
+cuda_engine:
+  nvcc_path: nvcc
+  cuda_std: c++17
+  arch: sm_80
+  max_compile_retries: 3
+  kernels_dir: data/cuda_kernels
