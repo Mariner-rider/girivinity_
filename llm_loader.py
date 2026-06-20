@@ -11,6 +11,43 @@ logger = logging.getLogger(__name__)
 _INSTANCE = None
 _LOCK = threading.Lock()
 
+    def cache_key(self) -> tuple[Any, ...]:
+        return (
+            self.model_id,
+            self.device_map,
+            self.torch_dtype,
+            self.load_in_4bit,
+            self.kv_cache,
+            self.base_model_path,
+            str(self.quantised_path),
+            self.n_ctx,
+            self.n_threads,
+            self.n_gpu_layers,
+            self.use_native_model,
+            self.native_model_path,
+        )
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+@dataclass(slots=True)
+class LLMEngineConfig(ModelConfig):
+    """Runtime generation config for LLMEngine.
+
+    Kept separate from ModelConfig so callers can depend on an engine-focused
+    name while sharing the same model-loading fields.
+    """
+
+
+GirivinityLoaderConfig = ModelConfig
+
+
 @dataclass(slots=True)
 class LoadedLLM:
     model: Any
