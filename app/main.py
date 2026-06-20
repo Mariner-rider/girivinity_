@@ -95,5 +95,4 @@ async def start_successor_engine():
 @app.on_event("startup")
 async def bootstrap_cuda():
     from app.core.cuda_crawler import CUDACrawler
-
     CUDACrawler().bootstrap_async()
