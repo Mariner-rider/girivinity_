@@ -169,6 +169,11 @@ class GirivinityTokenizerAdapter:
                 return int(token_id)
         return default
 
+@dataclass(slots=True)
+class LoadedLLM:
+    model: Any
+    tokenizer: Any | None = None
+    use_native_model: bool = False
 
 class GirivinityLoader:
     def __init__(self, config_path: str | Path = "config.yaml", config: ModelConfig | None = None) -> None:
