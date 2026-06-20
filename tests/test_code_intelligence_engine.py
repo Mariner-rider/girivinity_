@@ -2,7 +2,7 @@ from pathlib import Path
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from code_intelligence_engine import APITestCase, CodeIntelligenceEngine
+from app.engines.code_intelligence_engine import APITestCase, CodeIntelligenceEngine
 
 
 def test_generate_and_analyze_repo(tmp_path: Path):
