@@ -183,6 +183,18 @@ MIGRATIONS: list[str] = [
         updated_at              TIMESTAMPTZ DEFAULT NOW()
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS rasp_events (
+        id           BIGSERIAL PRIMARY KEY,
+        threat_type  TEXT        NOT NULL,
+        severity     TEXT        NOT NULL,
+        description  TEXT        DEFAULT '',
+        action_taken TEXT        DEFAULT '',
+        resolved     BOOLEAN     DEFAULT FALSE,
+        timestamp    TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+
 ]
 
 

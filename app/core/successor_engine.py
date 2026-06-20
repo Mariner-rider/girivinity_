@@ -2,63 +2,28 @@ from __future__ import annotations
 import json
 import logging
 import multiprocessing
+import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
 
 import yaml
-from app.core import db
 
 logger = logging.getLogger(__name__)
-
-
-GENERATION_CONFIGS = {
-    1: {
-        "dim": 3072, "n_layers": 28, "n_heads": 24,
-        "n_kv_heads": 8, "ffn_multiplier": 2.667,
-        "description": "Girivinity 3B — Foundation",
-    },
-    2: {
-        "dim": 4096, "n_layers": 32, "n_heads": 32,
-        "n_kv_heads": 8, "ffn_multiplier": 2.667,
-        "description": "Girivinity 7B — First Evolution",
-    },
-    3: {
-        "dim": 5120, "n_layers": 40, "n_heads": 40,
-        "n_kv_heads": 8, "ffn_multiplier": 2.667,
-        "description": "Girivinity 13B — Second Evolution",
-    },
-    4: {
-        "dim": 6656, "n_layers": 60, "n_heads": 52,
-        "n_kv_heads": 8, "ffn_multiplier": 2.667,
-        "description": "Girivinity 30B — Third Evolution",
-    },
-    5: {
-        "dim": 8192, "n_layers": 80, "n_heads": 64,
-        "n_kv_heads": 8, "ffn_multiplier": 2.667,
-        "description": "Girivinity 70B — Fourth Evolution",
-    },
-}
-
-CHUNK_THRESHOLDS_FOR_GENERATION = {
-    2: 100_000,
-    3: 500_000,
-    4: 2_000_000,
-    5: 10_000_000,
-}
-
 
 
 class SuccessorEngine:
     def __init__(self) -> None:
         cfg = yaml.safe_load(Path("config.yaml").read_text())
         se = cfg["successor_engine"]
+        tr = cfg["training"]
         self.check_interval_s = int(se["check_interval_seconds"])
         self.kb_threshold = int(se["knowledge_base_threshold"])
         self.quality_threshold = float(se["quality_score_threshold"])
         self.versions_dir = Path(se["versions_dir"])
         self.notifications_path = Path(se["notifications_path"])
         self.corpus_dir = Path(se["corpus_dir"])
+        self.db_path = Path(tr["queue_db"])
         self.active_link = Path("models/active")
 
     @classmethod
@@ -71,7 +36,18 @@ class SuccessorEngine:
         return p
 
     def log_feedback(self, user_id: str, score: float) -> None:
-        db.execute("INSERT INTO feedback (user_id, score) VALUES (%s, %s)", (user_id, score))
+        """Called from chat endpoint when user rates a response (1-5)."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS feedback "
+                "(id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "user_id TEXT, score REAL, timestamp TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO feedback (user_id, score, timestamp) "
+                "VALUES (?, ?, ?)",
+                (user_id, score, datetime.utcnow().isoformat()),
+            )
 
     def get_notifications(self) -> list[dict]:
         if not self.notifications_path.exists():
@@ -100,37 +76,6 @@ class SuccessorEngine:
         self._update_notification_status(version, "rejected")
         logger.info("Successor %s rejected", version)
         return True
-
-    def _get_next_generation(self) -> tuple[int, dict]:
-        """
-        Determines what generation the next model should be
-        based on how much training data has been accumulated.
-        """
-        total_trained = self._count_trained_chunks()
-
-        next_gen = 1
-        for gen, threshold in sorted(
-            CHUNK_THRESHOLDS_FOR_GENERATION.items()
-        ):
-            if total_trained >= threshold:
-                next_gen = gen
-
-        # Never exceed the highest defined generation
-        next_gen = min(next_gen, max(GENERATION_CONFIGS.keys()))
-
-        return next_gen, GENERATION_CONFIGS[next_gen]
-
-    def _get_current_generation(self) -> int:
-        """Read current generation from active model metadata."""
-        try:
-            meta = self.active_link / "generation.json"
-            if meta.exists():
-                import json
-                data = json.loads(meta.read_text())
-                return int(data.get("generation", 1))
-        except Exception:
-            pass
-        return 1
 
     def _run_daemon(self) -> None:
         logger.info("SuccessorEngine running, interval=%ds", self.check_interval_s)
@@ -176,53 +121,7 @@ class SuccessorEngine:
         version_dir = self.versions_dir / version
         version_dir.mkdir(parents=True, exist_ok=True)
 
-        # Determine next generation config
-        next_gen, gen_cfg = self._get_next_generation()
-        current_gen       = self._get_current_generation()
-
-        # Only upgrade if generation increases or
-        # significant new data is available
-        if next_gen <= current_gen:
-            logger.info(
-                "SuccessorEngine: still at generation %d, "
-                "not enough data to upgrade. "
-                "Need %d chunks for gen %d.",
-                current_gen,
-                CHUNK_THRESHOLDS_FOR_GENERATION.get(
-                    current_gen + 1, 999_999_999
-                ),
-                current_gen + 1,
-            )
-
-        # Update architecture config for this generation
-        from model.architecture import GirivinityConfig
-        new_cfg = GirivinityConfig(
-            dim=gen_cfg["dim"],
-            n_layers=gen_cfg["n_layers"],
-            n_heads=gen_cfg["n_heads"],
-            n_kv_heads=gen_cfg["n_kv_heads"],
-            ffn_multiplier=gen_cfg["ffn_multiplier"],
-        )
-
-        # Save new config so train.py picks it up
-        import yaml
-        cfg_override = self.versions_dir / version / "arch_config.yaml"
-        cfg_override.parent.mkdir(parents=True, exist_ok=True)
-        cfg_override.write_text(yaml.dump({
-            "architecture": {
-                "dim":            new_cfg.dim,
-                "n_layers":       new_cfg.n_layers,
-                "n_heads":        new_cfg.n_heads,
-                "n_kv_heads":     new_cfg.n_kv_heads,
-                "ffn_multiplier": new_cfg.ffn_multiplier,
-                "vocab_size":     new_cfg.vocab_size,
-                "max_seq_len":    new_cfg.max_seq_len,
-                "norm_eps":       new_cfg.norm_eps,
-                "rope_theta":     new_cfg.rope_theta,
-            }
-        }))
-
-        success = self._run_full_training(corpus_path, version_dir, next_gen, gen_cfg)
+        success = self._run_full_training(corpus_path, version_dir)
         if not success:
             logger.error("Full training failed for version %s", version)
             return
@@ -248,33 +147,38 @@ class SuccessorEngine:
             improvement_percent=improvement,
             trained_on_chunks=self._count_trained_chunks(),
             perplexity=perplexity,
-            current_gen=current_gen,
-            next_gen=next_gen,
-            gen_cfg=gen_cfg,
         )
 
     def _export_corpus(self, version: str) -> Path | None:
         corpus_dir = self.corpus_dir / version
         corpus_dir.mkdir(parents=True, exist_ok=True)
         corpus_path = corpus_dir / "corpus.jsonl"
-        try:
-            rows = db.fetchall("SELECT query, chunk_text FROM training_queue WHERE status='trained'")
-        except Exception as exc:
-            logger.warning("training_queue fetch failed: %s", exc)
-            return None
+        with sqlite3.connect(self.db_path) as conn:
+            try:
+                rows = conn.execute(
+                    "SELECT query, chunk_text FROM training_queue " "WHERE status='trained'"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                logger.warning("training_queue table not found")
+                return None
         if not rows:
             logger.warning("No trained chunks to export")
             return None
         with open(corpus_path, "w", encoding="utf-8") as f:
             for query, chunk_text in rows:
-                f.write(json.dumps({
-                    "instruction": f"What do you know about: {query}",
-                    "response": chunk_text,
-                }) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "instruction": f"What do you know about: {query}",
+                            "response": chunk_text,
+                        }
+                    )
+                    + "\n"
+                )
         logger.info("Exported %d chunks to %s", len(rows), corpus_path)
         return corpus_path
 
-    def _run_full_training(self, corpus_path: Path, output_dir: Path, next_gen: int, gen_cfg: dict) -> bool:
+    def _run_full_training(self, corpus_path: Path, output_dir: Path) -> bool:
         try:
             from model.train import train
 
@@ -287,16 +191,6 @@ class SuccessorEngine:
                 lr=3e-4,
                 grad_accum=8,
             )
-            import json
-            gen_meta = Path(output_dir) / "generation.json"
-            gen_meta.write_text(json.dumps({
-                "generation": next_gen,
-                "description": gen_cfg["description"],
-                "trained_on_chunks": self._count_trained_chunks(),
-                "trained_at": datetime.utcnow().isoformat(),
-                "dim": gen_cfg["dim"],
-                "n_layers": gen_cfg["n_layers"],
-            }, indent=2))
             return True
         except Exception as exc:
             logger.error("Full training error: %s", exc)
@@ -332,19 +226,21 @@ class SuccessorEngine:
 
     def _count_trained_chunks(self) -> int:
         try:
-            row = db.fetchone("SELECT COUNT(*) FROM training_queue WHERE status='trained'")
-            return int(row[0]) if row else 0
+            with sqlite3.connect(self.db_path) as conn:
+                return conn.execute(
+                    "SELECT COUNT(*) FROM training_queue WHERE status='trained'"
+                ).fetchone()[0]
         except Exception:
             return 0
 
     def _rolling_quality_score(self) -> float:
         try:
-            row = db.fetchone("""
-                SELECT AVG(score) FROM (
-                    SELECT score FROM feedback
-                    ORDER BY id DESC LIMIT 100
-                ) sub
-                """)
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT AVG(score) FROM "
+                    "(SELECT score FROM feedback "
+                    " ORDER BY id DESC LIMIT 100)"
+                ).fetchone()
             return float(row[0]) if row and row[0] is not None else 0.0
         except Exception:
             return 0.0
@@ -368,9 +264,6 @@ class SuccessorEngine:
         improvement_percent: float,
         trained_on_chunks: int,
         perplexity: float,
-        current_gen: int,
-        next_gen: int,
-        gen_cfg: dict,
     ) -> None:
         self.notifications_path.parent.mkdir(parents=True, exist_ok=True)
         notification = {
@@ -382,13 +275,6 @@ class SuccessorEngine:
             "perplexity": round(perplexity, 4),
             "timestamp": datetime.utcnow().isoformat(),
             "status": "awaiting_admin_approval",
-            "current_generation": current_gen,
-            "next_generation":    next_gen,
-            "model_description":  gen_cfg["description"],
-            "param_scale":        gen_cfg["dim"],
-            "chunks_needed_for_next": CHUNK_THRESHOLDS_FOR_GENERATION.get(
-                next_gen + 1, "maximum_reached"
-            ),
         }
         with open(self.notifications_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(notification) + "\n")

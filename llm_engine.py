@@ -2,7 +2,23 @@ from __future__ import annotations
 import logging
 from typing import Iterator
 
-from llm_loader import GirivinityLoader
+        transformers = importlib.import_module("transformers")
+        torch = importlib.import_module("torch")
+        dtype = getattr(torch, self.config.torch_dtype, torch.float16)
+        self._tokenizer = transformers.AutoTokenizer.from_pretrained(
+            self.config.model_id,
+            trust_remote_code=self.config.trust_remote_code,
+        )
+        self._hf_model = transformers.AutoModelForCausalLM.from_pretrained(
+            self.config.model_id,
+            device_map=self.config.device_map,
+            torch_dtype=dtype,
+            load_in_4bit=self.config.load_in_4bit,
+            trust_remote_code=self.config.trust_remote_code,
+            attn_implementation=self.config.attn_implementation,
+        )
+
+logger = logging.getLogger(__name__)
 
 logger = logging.getLogger(__name__)
 

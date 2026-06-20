@@ -13,17 +13,11 @@ from app.monitoring.logging import configure_logging
 from app.monitoring.metrics import REQUEST_COUNTER
 from app.core.self_trainer import SelfTrainer
 from app.core.successor_engine import SuccessorEngine
-from app.core.migrations import run_migrations
-from app.core.db import close_pool
 from app.api.routes.admin import router as admin_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.health import router as health_router
 from app.api.routes.skills import router as skills_router
 from app.api.routes.cuda import router as cuda_router
-from app.security.cyber_shield import CyberShieldMiddleware
-from app.api.routes.security import router as security_router
-from app.api.routes.tenant_security import router as tenant_security_router
-from app.api.routes.agents import router as agents_router
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +38,11 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Girivinity", lifespan=lifespan)
-app.add_middleware(CyberShieldMiddleware)
 app.include_router(chat_router)
 app.include_router(health_router)
 app.include_router(admin_router)
 app.include_router(skills_router)
 app.include_router(cuda_router)
-app.include_router(security_router)
-app.include_router(tenant_security_router)
-app.include_router(agents_router)
 
 
 def _start_self_trainer_once() -> None:
@@ -105,13 +95,5 @@ async def start_successor_engine():
 @app.on_event("startup")
 async def bootstrap_cuda():
     from app.core.cuda_crawler import CUDACrawler
+
     CUDACrawler().bootstrap_async()
-
-
-@app.on_event("startup")
-async def startup():
-    run_migrations()
-
-@app.on_event("shutdown")
-async def shutdown():
-    close_pool()

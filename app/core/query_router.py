@@ -89,11 +89,13 @@ class QueryRouter:
     def _queue_training(self, query: str, chunks: list[dict]) -> None:
         try:
             from app.core.self_trainer import SelfTrainer
+
             SelfTrainer().queue(query=query, chunks=chunks)
         except Exception as exc:
             logger.warning("Training queue failed: %s", exc)
         try:
             from app.core.skill_forge import SkillForge
+
             urls = [c.get("url", "") for c in chunks if c.get("url")]
             SkillForge().generate_async(
                 topic=query, chunks=chunks, urls=urls

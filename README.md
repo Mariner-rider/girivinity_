@@ -163,8 +163,6 @@ In plain language: these optimizations aim to make the model *faster, cheaper, a
 
 ## API Reference
 ### Chat
-- `POST /chat/message`
-- `POST /chat/message/stream`
 
 ### Agents
 - `POST /agents/run`
