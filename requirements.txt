@@ -19,11 +19,8 @@ opencv-python-headless>=4.9.0   # Video frame extraction
 
 # === EMBEDDINGS & RAG ===
 sentence-transformers>=2.7.0
-faiss-cpu>=1.8.0
-chromadb>=0.4.24
-rank-bm25>=0.2.2                 # BM25 hybrid retrieval
-
-# === FINE-TUNING & SELF-IMPROVEMENT ===
+rank-bm25>=0.2.2
+chromadb>=0.5.0
 peft>=0.10.0
 trl>=0.8.6
 datasets>=2.19.0

@@ -16,20 +16,12 @@ app:
 # MODEL — Hardware-adaptive, generation-aware
 # ============================================================
 model:
-  # Current generation
-  generation: 1
-  parameter_scale: "3B"            # 3B → 7B → 13B → 34B → 70B
-  backend: "hybrid"                # "transformers" | "llama_cpp" | "hybrid"
-
-  # HuggingFace model (used when backend = transformers or hybrid embedding)
-  model_id: "microsoft/Phi-3-mini-4k-instruct"
-
-  # GGUF model (used when backend = llama_cpp or hybrid generation)
-  gguf_path: "models/gguf/girivinity-q4_k_m.gguf"
-  quantised_path: "models/gguf/girivinity-q4_k_m.gguf"
-  base_model_path: "models/base"
-
-  # Hardware settings
+  # Set true after running model/train.py to use Girivinity's own weights
+  use_native_model: false
+  # Path to a saved GirivinityModel checkpoint directory (config.json + pytorch_model.bin + tokenizer.json).
+  native_model_path: ""
+  # Set to 'girivinity-native' to use own trained model, or a HuggingFace model_id for the HF path
+  model_id: "girivinity-native"
   device_map: "auto"
   n_gpu_layers: -1                 # -1 = all layers on GPU if VRAM sufficient
   n_ctx: 4096
@@ -51,58 +43,15 @@ model:
 
   # Architecture (current generation — 3B Phi-3-mini spec)
   architecture:
-    dim: 3072
-    n_layers: 32
-    n_heads: 32
-    n_kv_heads: 8
-    vocab_size: 32064
-    max_seq_len: 4096
+    vocab_size: 65536
+    max_seq_len: 32768
+    dim: 2048
+    n_layers: 24
+    n_heads: 16
+    n_kv_heads: 4
     ffn_multiplier: 2.667
-    rope_theta: 10000.0
-
-  # Scaling ladder — used by successor engine to provision next generation
-  scaling_ladder:
-    - { generation: 1, param_label: "3B",  n_layers: 32,  dim: 3072,  n_heads: 32 }
-    - { generation: 2, param_label: "7B",  n_layers: 32,  dim: 4096,  n_heads: 32 }
-    - { generation: 3, param_label: "13B", n_layers: 40,  dim: 5120,  n_heads: 40 }
-    - { generation: 4, param_label: "34B", n_layers: 60,  dim: 7168,  n_heads: 56 }
-    - { generation: 5, param_label: "70B", n_layers: 80,  dim: 8192,  n_heads: 64 }
-
-# ============================================================
-# MULTIMODAL — Natively fused modalities
-# ============================================================
-multimodal:
-  enabled: true
-  fusion_mode: "cross_attention"   # "concat" | "cross_attention" | "gated"
-
-  image:
-    enabled: true
-    encoder: "openai/clip-vit-large-patch14"
-    encoder_dim: 1024              # CLIP ViT-L output dim
-    projection_dim: 3072           # must match model.architecture.dim
-    patch_size: 14
-    image_size: 224
-    max_image_tokens: 256
-    projection_checkpoint: "models/multimodal/vision_projection.pt"
-
-  audio:
-    enabled: true
-    encoder: "whisper"
-    whisper_size: "base"           # "tiny" | "base" | "small" | "medium"
-    encoder_dim: 512               # Whisper base encoder output dim
-    projection_dim: 3072
-    max_audio_tokens: 32           # Pooled audio representation
-    projection_checkpoint: "models/multimodal/audio_projection.pt"
-
-  video:
-    enabled: true
-    frame_sample_rate: 1           # 1 frame per second
-    max_frames: 8
-    reuse_image_encoder: true      # Each frame goes through image encoder
-
-  code:
-    enabled: true
-    syntax_tokenizer: "pygments"   # Syntax-aware tokenization before encoding
+    norm_eps: 0.00001
+    rope_theta: 500000.0
 
   fusion:
     n_heads: 12
@@ -211,49 +160,31 @@ cybersecurity:
     memory_limit: "128m"
     cpu_quota: 10000
 
-# ============================================================
-# SELF-IMPROVEMENT — Closed autonomous loop
-# ============================================================
-self_improvement:
-  enabled: true
-  crawler_interval_seconds: 3600
-  distill_batch_size: 100
-  lora_trigger_threshold: 200
-  eval_metric: "perplexity"
-  min_improvement_delta: 0.005
-  adapter_hot_swap: true
-  reward_model: "llm_as_judge"
+compute:
+  # Auto-detects GPU at runtime. Set to "cpu" to force CPU-only mode.
+  # Set to "cuda" to require GPU (will error if not available).
+  device: "auto"
 
-# ============================================================
-# SUCCESSOR ENGINE — Autonomous scaling to next generation
-# ============================================================
-successor_engine:
-  enabled: true
-  check_interval_seconds: 86400
-  chunk_threshold: 100000          # Distilled chunks needed to trigger scaling
-  quality_threshold: 3.5           # Mean quality score needed
-  feedback_window: 1000
-  auto_provision: true             # Automatically start next-gen training
-  knowledge_transfer: true         # Distil current model into next-gen seed data
-  versions_dir: "models/versions"
-  active_model_symlink: "models/active"
-  notifications_path: "admin_notifications.jsonl"
-  state_path: "data/successor_state.json"
-  trained_collection: "trained"
-  chroma_path: null
-  feedback_db_path: "data/user_feedback.sqlite3"
-  training_root: "data/successor_training"
-  # Training config for next-gen provisioning
-  batch_size: 4
-  epochs: 3
-  learning_rate: 0.0001
-  train_seq_len: 512
-  eval_split: 0.1
-  device: "cpu"
+  # Training settings per device type
+  training:
+    gpu:
+      use_amp: true              # Mixed precision (float16) on GPU
+      dataloader_num_workers: 4  # Parallel data loading on GPU
+      gradient_checkpointing: true
+    cpu:
+      use_amp: false             # AMP disabled on CPU
+      dataloader_num_workers: 0  # No multiprocessing on CPU
+      gradient_checkpointing: true  # Still useful to save RAM on CPU
 
-# ============================================================
-# CRAWLER
-# ============================================================
+  # Inference settings
+  inference:
+    gpu:
+      load_in_4bit: true         # 4-bit NF4 quantization on GPU
+      torch_dtype: "float16"
+    cpu:
+      load_in_4bit: false        # No 4-bit on CPU (use GGUF instead)
+      torch_dtype: "float32"
+
 crawler:
   max_depth: 100
   concurrent_requests: 3200000
@@ -282,9 +213,30 @@ training:
   max_training_epochs: 1
   require_validation_dataset: true
   require_benchmark_improvement: true
-  min_benchmark_delta: 0.0
-  adapters_dir: "models/adapters"
-  latest_adapter_path: "models/adapters/latest"
+  pretrain:
+    data_path: "data/distillation/output.jsonl"
+    output_dir: "models/girivinity_pretrain"
+    batch_size: 2
+    learning_rate: 0.0003
+    warmup_steps: 100
+    max_steps: 1000
+    gradient_accumulation_steps: 8
+    checkpoint_every: 100
+    use_amp: true
+    use_fsdp: false
+    device: "auto"
+    model_config:
+      vocab_size: 65536
+      hidden_dim: 2048
+      num_heads: 16
+      num_layers: 24
+      ffn_dim: 8192
+      max_seq_len: 4096
+      dropout: 0.1
+      use_rope: true
+      use_gqa: true
+      num_kv_heads: 4
+      use_rmsnorm: true
 
 # ============================================================
 # SECURITY
@@ -409,57 +361,28 @@ skill_forge:
   min_chunks_to_generate: 3
   max_skills_composed: 3
 
-cuda_engine:
-  nvcc_path: nvcc
-  cuda_std: c++17
-  arch: sm_80
-  max_compile_retries: 3
-  kernels_dir: data/cuda_kernels
-
-database:
-  host: localhost
-  port: 5432
-  name: girivinity
-  user: girivinity_user
-  password: changeme
-  pool_min_conn: 2
-  pool_max_conn: 10
-
-domain_training:
-  data_dir: data/domain_training
-  target_tokens_per_domain: 5000000
-  finetune_epochs: 3
-  finetune_lr: 0.00005
-  finetune_batch_size: 2
-  grad_accum: 16
-  max_seq_len: 2048
-  output_dir: models/domain_finetuned
-
-architecture:
-  dim: 3072
-  n_layers: 32
-  n_heads: 32
-  n_kv_heads: 8
-  vocab_size: 32064
-  max_seq_len: 4096
-  ffn_multiplier: 2.667
-  norm_eps: 0.00001
-  rope_theta: 10000.0
-
-lora:
-  r: 16
-  alpha: 32
-  dropout: 0.05
-  target_modules:
-    - q_proj
-    - v_proj
-    - k_proj
-    - o_proj
-  epochs: 3
+successor_engine:
+  current_generation: 1  # Generation 1 is now Girivinity-3B
+  check_interval_seconds: 86400
+  chunk_threshold: 100000
+  quality_threshold: 3.5
+  feedback_window: 1000
+  trained_collection: "trained"
+  chroma_path: null
+  feedback_db_path: "data/user_feedback.sqlite3"
+  training_root: "data/successor_training"
+  versions_dir: "models/versions"
+  active_model_symlink: "models/active"
+  notifications_path: "admin_notifications.jsonl"
+  state_path: "data/successor_state.json"
+  batch_size: 2
+  epochs: 1
   learning_rate: 0.0002
   train_seq_len: 256
   eval_split: 0.1
-  device: "cpu"
+  device: "auto"
+  auto_quantize: true        # Quantize successor to GGUF after training
+  quant_type: "Q4_K_M"      # Quantization format for CPU inference
 
 
 skill_forge:
