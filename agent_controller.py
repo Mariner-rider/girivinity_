@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -58,7 +59,7 @@ class Agent(Protocol):
 class LocalLLMEngine:
     """Small deterministic fallback LLM for tests and offline controller use."""
 
-    def generate(self, prompt: str, max_tokens: int = 512, stream: bool = False) -> str:
+    def generate(self, prompt: str, max_tokens: int = 512, stream: bool = False, **kwargs: Any) -> str:
         lower = prompt.lower()
         if "cybersecurity intelligence agent" in lower:
             return json.dumps(
@@ -81,7 +82,7 @@ class LocalLLMEngine:
                     "severity": "medium",
                     "specific_flaws": ["Evidence may be incomplete."],
                     "corrections": ["Cross-check retrieved sources."],
-                    "confidence": 0.72,
+                    "confidence": self.confidence_from_entropy(prompt, "critic_agent"),
                 }
             )
         if "knowledge consolidation agent" in lower:
@@ -91,7 +92,7 @@ class LocalLLMEngine:
                     "key_facts": ["Shared memory was updated."],
                     "action_items": ["Review citations."],
                     "knowledge_type": "conceptual",
-                    "confidence": 0.8,
+                    "confidence": self.confidence_from_entropy(prompt, "knowledge_agent"),
                 }
             )
         if "logical reasoning agent" in lower:
@@ -101,21 +102,36 @@ class LocalLLMEngine:
                     "causal_chains": [],
                     "assumptions": ["Retrieved context is relevant."],
                     "plan": ["Review facts", "Apply reasoning", "Produce answer"],
-                    "confidence": 0.76,
+                    "confidence": self.confidence_from_entropy(prompt, "reasoning_agent"),
                 }
             )
         return json.dumps(
             {
                 "findings": ["Relevant context gathered for the task."],
                 "key_facts": ["Context is available for downstream reasoning."],
-                "confidence": 0.74,
+                "confidence": self.confidence_from_entropy(prompt, "research_agent"),
                 "uncertainty": "Source coverage may be incomplete.",
                 "sources": [],
             }
         )
 
     def get_token_entropy(self, prompt: str) -> float:
-        return min(2.0, max(0.1, len(prompt.split()) / 500))
+        import math
+        tokens = prompt.lower().split()
+        if not tokens:
+            return 1.0
+        counts = {t: tokens.count(t) for t in set(tokens)}
+        total = len(tokens)
+        return -sum((c / total) * math.log(c / total) for c in counts.values())
+
+    def confidence_from_entropy(self, prompt: str, agent_name: str = "local") -> float:
+        entropy = self.get_token_entropy(prompt)
+        raw = 1.0 / (1.0 + max(0.0, entropy))
+        try:
+            from app.cognition.calibration import CalibrationManager
+            return CalibrationManager.from_config().calibrate(raw, agent_name)
+        except Exception:
+            return round(min(1.0, max(0.0, raw)), 3)
 
 
 class QueryRouterRAGEngine:
@@ -148,7 +164,49 @@ class SecurityIntelligenceEngine:
         return []
 
 
-class ResearchAgent(BaseAgent):
+
+class AgentLLMMixin:
+    def _rag_context(self, task: str) -> str:
+        if self.rag is None:
+            return ""
+        try:
+            results = self.rag.query(task, top_k=5)
+        except Exception as exc:
+            return f"RAG retrieval failed: {exc}"
+        return "\n".join(f"[{i + 1}] {str(r.get('text', ''))[:300]}" for i, r in enumerate(results or []))
+
+    def _compute_confidence(self, prompt: str) -> float:
+        try:
+            entropy = self.llm.get_token_entropy(prompt)
+            return round(1.0 / (1.0 + float(entropy)), 3)
+        except Exception:
+            return 0.5
+
+    def _safe_json_parse(self, text: str) -> dict[str, Any]:
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {"raw": text}
+        except Exception:
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(match.group())
+                    return parsed if isinstance(parsed, dict) else {"raw": text}
+                except Exception:
+                    return {"raw": text}
+            return {"raw": text}
+
+    def _llm_text(self, prompt: str, max_new_tokens: int = 400, temperature: float = 0.1) -> str:
+        result = self.llm.generate(prompt, max_new_tokens=max_new_tokens, max_tokens=max_new_tokens, temperature=temperature, stream=False)
+        return str(getattr(result, "text", result))
+
+    def _as_output_text(self, value: Any) -> str:
+        if isinstance(value, list):
+            return "\n".join(str(item) for item in value)
+        return str(value)
+
+
+class ResearchAgent(AgentLLMMixin, BaseAgent):
     @property
     def name(self) -> str:
         return "research_agent"
@@ -186,16 +244,43 @@ class ResearchAgent(BaseAgent):
         parsed.setdefault("answer", "\n".join(findings) if findings else raw[:500])
         return parsed
 
-    def run(self, *args: Any, **kwargs: Any) -> AgentResult:
-        result = super().run(*args, **kwargs)
-        memory = args[1]
-        if isinstance(memory, SharedMemory):
-            memory.add_fact(result.output)
-            memory.notes["research_findings"] = result.output
-        return result
+    def run(
+        self,
+        task: str,
+        memory: SharedMemory,
+        mailbox: list[AgentMessage],
+        hidden_scratchpad: list[str],
+        user_id: str | None = None,
+        sentiment: dict[str, Any] | None = None,
+    ) -> AgentResult:
+        context = self._rag_context(task)
+        facts_str = "\n".join(memory.facts[-10:]) if memory.facts else "None"
+        prompt = f"""You are a research agent. Collect the most relevant facts for this task.
+
+Task: {task}
+
+Retrieved context:
+{context}
+
+Known facts so far:
+{facts_str}
+
+Output JSON only, no preamble:
+{{"findings": ["fact 1", "fact 2"], "key_facts": ["..."], "uncertainty": "...", "confidence": 0.0}}
+"""
+        hidden_scratchpad.append(f"[{self.name}] prompt built, {len(prompt)} chars")
+        raw = self._llm_text(prompt, max_new_tokens=400, temperature=0.1)
+        parsed = self._safe_json_parse(raw)
+        findings = self._as_list(parsed.get("findings", parsed.get("key_facts", parsed.get("raw", raw))))
+        for fact in findings:
+            memory.add_fact(fact)
+        memory.notes["research_findings"] = "\n".join(findings)
+        mailbox.append(AgentMessage(self.name, "reasoning_agent", raw[:500]))
+        confidence = self._compute_confidence(prompt)
+        return AgentResult(self.name, self._as_output_text(findings), confidence, citations=["rag"] if context else [])
 
 
-class ReasoningAgent(BaseAgent):
+class ReasoningAgent(AgentLLMMixin, BaseAgent):
     @property
     def name(self) -> str:
         return "reasoning_agent"
@@ -232,17 +317,37 @@ class ReasoningAgent(BaseAgent):
         parsed.setdefault("analysis", parsed.get("raw", raw[:500]))
         return parsed
 
-    def run(self, *args: Any, **kwargs: Any) -> AgentResult:
-        result = super().run(*args, **kwargs)
-        memory = args[1]
-        mailbox = args[2]
-        if isinstance(memory, SharedMemory):
-            memory.notes["draft_plan"] = result.output
-        mailbox.append(AgentMessage(self.name, "critic_agent", result.output))
-        return result
+    def run(
+        self,
+        task: str,
+        memory: SharedMemory,
+        mailbox: list[AgentMessage],
+        hidden_scratchpad: list[str],
+        user_id: str | None = None,
+        sentiment: dict[str, Any] | None = None,
+    ) -> AgentResult:
+        research_messages = [m.content for m in mailbox if m.recipient == self.name]
+        prompt = f"""You are a logical reasoning agent. Analyse the research findings and produce a structured plan.
+
+Task: {task}
+Research findings: {research_messages}
+Memory facts: {memory.facts[-5:]}
+
+Output JSON only:
+{{"analysis": "...", "causal_chains": [{{"cause": "...", "effect": "..."}}], "plan": ["step1", "step2"], "assumptions": ["..."], "confidence": 0.0}}
+"""
+        hidden_scratchpad.append(f"[{self.name}] prompt built, {len(prompt)} chars")
+        raw = self._llm_text(prompt, max_new_tokens=500, temperature=0.1)
+        parsed = self._safe_json_parse(raw)
+        output = str(parsed.get("analysis", parsed.get("raw", raw)))
+        memory.notes["draft_plan"] = output
+        if parsed.get("plan"):
+            memory.notes["plan_steps"] = parsed["plan"]
+        mailbox.append(AgentMessage(self.name, "critic_agent", raw[:500]))
+        return AgentResult(self.name, output, self._compute_confidence(prompt), citations=[])
 
 
-class CriticAgent(BaseAgent):
+class CriticAgent(AgentLLMMixin, BaseAgent):
     @property
     def name(self) -> str:
         return "critic_agent"
@@ -283,17 +388,35 @@ class CriticAgent(BaseAgent):
         parsed.setdefault("analysis", parsed.get("critique", parsed.get("raw", raw[:500])))
         return parsed
 
-    def run(self, *args: Any, **kwargs: Any) -> AgentResult:
-        result = super().run(*args, **kwargs)
-        memory = args[1]
-        check = self.causal.counterfactual_check(memory.notes.get("draft_plan", ""), result.output)
-        if isinstance(memory, SharedMemory):
-            memory.notes["critique"] = result.output
-            memory.notes["counterfactual_check"] = check
-        return result
+    def run(
+        self,
+        task: str,
+        memory: SharedMemory,
+        mailbox: list[AgentMessage],
+        hidden_scratchpad: list[str],
+        user_id: str | None = None,
+        sentiment: dict[str, Any] | None = None,
+    ) -> AgentResult:
+        draft = memory.notes.get("draft_plan", "")
+        prompt = f"""You are a critical review agent. Find flaws in this analysis.
+
+Task: {task}
+Draft plan: {draft}
+
+Output JSON only:
+{{"critique": "...", "severity": "low|medium|high", "specific_flaws": ["..."], "corrections": ["..."], "confidence": 0.0}}
+"""
+        hidden_scratchpad.append(f"[{self.name}] prompt built, {len(prompt)} chars")
+        raw = self._llm_text(prompt, max_new_tokens=400, temperature=0.1)
+        parsed = self._safe_json_parse(raw)
+        critique = str(parsed.get("critique", parsed.get("raw", raw)))
+        check = self.causal.counterfactual_check(str(draft), critique)
+        memory.notes["critique"] = critique
+        memory.notes["counterfactual_check"] = check
+        return AgentResult(self.name, critique, self._compute_confidence(prompt), citations=[])
 
 
-class MemoryAgent(BaseAgent):
+class MemoryAgent(AgentLLMMixin, BaseAgent):
     @property
     def name(self) -> str:
         return "memory_agent"
@@ -331,17 +454,33 @@ class MemoryAgent(BaseAgent):
         parsed.setdefault("summary", parsed.get("raw", raw[:500]))
         return parsed
 
-    def run(self, *args: Any, **kwargs: Any) -> AgentResult:
-        result = super().run(*args, **kwargs)
-        memory = args[1]
-        parsed = self.parse_response(result.output)
-        summary = parsed.get("summary", result.output)
-        knowledge_type = parsed.get("knowledge_type", "conceptual")
+    def run(
+        self,
+        task: str,
+        memory: SharedMemory,
+        mailbox: list[AgentMessage],
+        hidden_scratchpad: list[str],
+        user_id: str | None = None,
+        sentiment: dict[str, Any] | None = None,
+    ) -> AgentResult:
+        all_context = "\n".join(memory.facts + [str(value) for value in memory.notes.values()])
+        prompt = f"""You are a memory consolidation agent. Summarise all findings into a permanent knowledge entry.
+
+All context: {all_context[:2000]}
+Task: {task}
+
+Output JSON only:
+{{"summary": "...", "key_facts": ["..."], "action_items": ["..."], "knowledge_type": "factual|procedural|conceptual"}}
+"""
+        hidden_scratchpad.append(f"[{self.name}] prompt built, {len(prompt)} chars")
+        raw = self._llm_text(prompt, max_new_tokens=400, temperature=0.1)
+        parsed = self._safe_json_parse(raw)
+        summary = str(parsed.get("summary", parsed.get("raw", raw)))
+        knowledge_type = str(parsed.get("knowledge_type", "conceptual"))
         if self.rag and hasattr(self.rag, "add"):
             self.rag.add(summary, source="agent_memory", metadata={"type": knowledge_type})
-        if isinstance(memory, SharedMemory):
-            memory.notes["memory_summary"] = summary
-        return result
+        memory.notes["memory_summary"] = summary
+        return AgentResult(self.name, summary, self._compute_confidence(prompt), citations=[])
 
 
 class CybersecurityAgent(BaseAgent):
@@ -426,14 +565,17 @@ class AgentController:
 
     def __init__(
         self,
-        security_guard: SecurityGuard | None = None,
         llm_engine: Any | None = None,
         rag_engine: Any | None = None,
+        security_guard: SecurityGuard | None = None,
         sentiment_engine: SentimentEngine | None = None,
         theory_of_mind: TheoryOfMindEngine | None = None,
         episodic_memory: Any | None = None,
         security_engine: SecurityIntelligenceEngine | None = None,
     ) -> None:
+        if isinstance(llm_engine, SecurityGuard) and security_guard is None:
+            security_guard = llm_engine
+            llm_engine = None
         self.security_guard = security_guard or SecurityGuard()
         self.memory = SharedMemory()
         self.reasoning_planner = ReasoningPlanner()

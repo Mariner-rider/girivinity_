@@ -95,7 +95,8 @@ class SuccessorEngine:
         if not version_dir.exists():
             logger.error("Version %s not found", version)
             return False
-        if self.active_link.is_symlink():
+        self.active_link.parent.mkdir(parents=True, exist_ok=True)
+        if self.active_link.is_symlink() or self.active_link.exists():
             self.active_link.unlink()
         self.active_link.symlink_to(version_dir.resolve())
         self._update_notification_status(version, "approved")
