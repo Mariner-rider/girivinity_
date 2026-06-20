@@ -81,7 +81,7 @@ class LocalLLMEngine:
                     "severity": "medium",
                     "specific_flaws": ["Evidence may be incomplete."],
                     "corrections": ["Cross-check retrieved sources."],
-                    "confidence": 0.72,
+                    "confidence": self.confidence_from_entropy(prompt, "critic_agent"),
                 }
             )
         if "knowledge consolidation agent" in lower:
@@ -91,7 +91,7 @@ class LocalLLMEngine:
                     "key_facts": ["Shared memory was updated."],
                     "action_items": ["Review citations."],
                     "knowledge_type": "conceptual",
-                    "confidence": 0.8,
+                    "confidence": self.confidence_from_entropy(prompt, "knowledge_agent"),
                 }
             )
         if "logical reasoning agent" in lower:
@@ -101,21 +101,36 @@ class LocalLLMEngine:
                     "causal_chains": [],
                     "assumptions": ["Retrieved context is relevant."],
                     "plan": ["Review facts", "Apply reasoning", "Produce answer"],
-                    "confidence": 0.76,
+                    "confidence": self.confidence_from_entropy(prompt, "reasoning_agent"),
                 }
             )
         return json.dumps(
             {
                 "findings": ["Relevant context gathered for the task."],
                 "key_facts": ["Context is available for downstream reasoning."],
-                "confidence": 0.74,
+                "confidence": self.confidence_from_entropy(prompt, "research_agent"),
                 "uncertainty": "Source coverage may be incomplete.",
                 "sources": [],
             }
         )
 
     def get_token_entropy(self, prompt: str) -> float:
-        return min(2.0, max(0.1, len(prompt.split()) / 500))
+        import math
+        tokens = prompt.lower().split()
+        if not tokens:
+            return 1.0
+        counts = {t: tokens.count(t) for t in set(tokens)}
+        total = len(tokens)
+        return -sum((c / total) * math.log(c / total) for c in counts.values())
+
+    def confidence_from_entropy(self, prompt: str, agent_name: str = "local") -> float:
+        entropy = self.get_token_entropy(prompt)
+        raw = 1.0 / (1.0 + max(0.0, entropy))
+        try:
+            from app.cognition.calibration import CalibrationManager
+            return CalibrationManager.from_config().calibrate(raw, agent_name)
+        except Exception:
+            return round(min(1.0, max(0.0, raw)), 3)
 
 
 class QueryRouterRAGEngine:
