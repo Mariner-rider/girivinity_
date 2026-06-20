@@ -9,7 +9,34 @@ from pathlib import Path
 
 import yaml
 
+from app.core.model_generation_policy import GenerationPolicy
+
 logger = logging.getLogger(__name__)
+
+
+def _quantize_successor(weights_path: str, output_path: str, quant_type: str = "Q4_K_M") -> bool:
+    try:
+        from model.quantise import export_to_gguf
+
+        export_to_gguf(weights_path, output_path, quant_type)
+        gguf_path = Path(output_path) / "model.gguf"
+        if gguf_path.exists():
+            logger.info(
+                "Successor quantization completed: weights=%s output=%s quant_type=%s",
+                weights_path,
+                output_path,
+                quant_type,
+            )
+            return True
+        logger.error(
+            "Successor quantization did not produce GGUF: weights=%s output=%s",
+            weights_path,
+            output_path,
+        )
+        return False
+    except Exception as exc:
+        logger.error("Successor quantization failed: %s", exc)
+        return False
 
 
 class SuccessorEngine:
@@ -18,13 +45,16 @@ class SuccessorEngine:
         se = cfg["successor_engine"]
         tr = cfg["training"]
         self.check_interval_s = int(se["check_interval_seconds"])
-        self.kb_threshold = int(se["knowledge_base_threshold"])
-        self.quality_threshold = float(se["quality_score_threshold"])
+        self.kb_threshold = int(se.get("knowledge_base_threshold", se.get("chunk_threshold", 100000)))
+        self.quality_threshold = float(se.get("quality_score_threshold", se.get("quality_threshold", 3.5)))
         self.versions_dir = Path(se["versions_dir"])
         self.notifications_path = Path(se["notifications_path"])
-        self.corpus_dir = Path(se["corpus_dir"])
+        self.corpus_dir = Path(se.get("corpus_dir", se.get("training_root", "data/successor_training")))
         self.db_path = Path(tr["queue_db"])
-        self.active_link = Path("models/active")
+        self.active_link = Path(se.get("active_model_symlink", "models/active"))
+        self.auto_quantize = bool(se.get("auto_quantize", True))
+        self.quant_type = str(se.get("quant_type", "Q4_K_M"))
+        self.generation_policy = GenerationPolicy()
 
     @classmethod
     def start(cls) -> multiprocessing.Process:
@@ -108,6 +138,12 @@ class SuccessorEngine:
             reason.append(f"kb_chunks={kb_count}>={self.kb_threshold}")
         if quality_trigger:
             reason.append(f"quality={avg_score:.2f}<{self.quality_threshold}")
+        next_generation = self.generation_policy.get_next_generation()
+        if self.generation_policy._is_extrapolated(next_generation):
+            logger.info(
+                "Beyond defined roadmap — extrapolating next generation: %s",
+                next_generation.name,
+            )
         logger.info("SuccessorEngine triggered: %s", ", ".join(reason))
 
         self._build_successor()
@@ -125,6 +161,15 @@ class SuccessorEngine:
         if not success:
             logger.error("Full training failed for version %s", version)
             return
+
+        quantization_status = "quantization_failed"
+        if self.auto_quantize:
+            quantized = _quantize_successor(
+                weights_path=str(version_dir / "final"),
+                output_path=str(version_dir),
+                quant_type=self.quant_type,
+            )
+            quantization_status = "quantized" if quantized else "quantization_failed"
 
         perplexity = self._evaluate(version_dir)
         prev_version, prev_perplexity = self._get_current_model_stats()
@@ -147,6 +192,7 @@ class SuccessorEngine:
             improvement_percent=improvement,
             trained_on_chunks=self._count_trained_chunks(),
             perplexity=perplexity,
+            quantization_status=quantization_status,
         )
 
     def _export_corpus(self, version: str) -> Path | None:
@@ -180,18 +226,32 @@ class SuccessorEngine:
 
     def _run_full_training(self, corpus_path: Path, output_dir: Path) -> bool:
         try:
+            import torch
             from model.train import train
 
-            train(
-                data_path=str(corpus_path.parent),
-                tokeniser_path="models/tokeniser/tokeniser.json",
-                output_dir=str(output_dir),
-                epochs=3,
-                batch_size=4,
-                lr=3e-4,
-                grad_accum=8,
-            )
-            return True
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            on_gpu = device.type == "cuda"
+            if on_gpu:
+                logger.info("Training on GPU: %s", torch.cuda.get_device_name(0))
+                scaler = torch.cuda.amp.GradScaler()
+                _ = scaler
+            else:
+                logger.info("Training on CPU — this will be slow, consider a GPU instance")
+
+            try:
+                train(
+                    data_path=str(corpus_path.parent),
+                    tokeniser_path="models/tokeniser/tokeniser.json",
+                    output_dir=str(output_dir),
+                    epochs=3,
+                    batch_size=4,
+                    lr=3e-4,
+                    grad_accum=8,
+                )
+                return True
+            finally:
+                if on_gpu:
+                    torch.cuda.empty_cache()
         except Exception as exc:
             logger.error("Full training error: %s", exc)
             return False
@@ -204,22 +264,32 @@ class SuccessorEngine:
             import torch.nn.functional as F
             from model.architecture import GirivinityConfig, GirivinityModel
 
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            on_gpu = device.type == "cuda"
+            if on_gpu:
+                logger.info("Training on GPU: %s", torch.cuda.get_device_name(0))
+            else:
+                logger.info("Training on CPU — this will be slow, consider a GPU instance")
+
             cfg = GirivinityConfig.from_yaml()
-            model = GirivinityModel(cfg)
+            model = GirivinityModel(cfg).to(device)
             weights = model_dir / "final" / "model.pt"
             if not weights.exists():
                 return float("inf")
-            model.load_state_dict(torch.load(weights, map_location="cpu"))
+            model.load_state_dict(torch.load(weights, map_location=device))
             model.eval()
 
             with torch.no_grad():
-                ids = torch.randint(0, cfg.vocab_size, (1, 64))
+                ids = torch.randint(0, cfg.vocab_size, (1, 64), device=device)
                 logits, _ = model(ids)
                 loss = F.cross_entropy(
                     logits[:, :-1].reshape(-1, cfg.vocab_size),
                     ids[:, 1:].reshape(-1),
                 )
-            return math.exp(loss.item())
+            result = math.exp(loss.item())
+            if on_gpu:
+                torch.cuda.empty_cache()
+            return result
         except Exception as exc:
             logger.error("Evaluation failed: %s", exc)
             return float("inf")
@@ -264,6 +334,7 @@ class SuccessorEngine:
         improvement_percent: float,
         trained_on_chunks: int,
         perplexity: float,
+        quantization_status: str = "quantization_failed",
     ) -> None:
         self.notifications_path.parent.mkdir(parents=True, exist_ok=True)
         notification = {
@@ -273,6 +344,7 @@ class SuccessorEngine:
             "improvement_percent": improvement_percent,
             "trained_on_chunks": trained_on_chunks,
             "perplexity": round(perplexity, 4),
+            "quantization_status": quantization_status,
             "timestamp": datetime.utcnow().isoformat(),
             "status": "awaiting_admin_approval",
         }

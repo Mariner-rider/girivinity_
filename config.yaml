@@ -8,7 +8,12 @@ app:
   auto_load_model: false
 
 model:
-  model_id: "models/base"
+  # Set true after running model/train.py to use Girivinity's own weights
+  use_native_model: false
+  # Path to a saved GirivinityModel checkpoint directory (config.json + pytorch_model.bin + tokenizer.json).
+  native_model_path: ""
+  # Set to 'girivinity-native' to use own trained model, or a HuggingFace model_id for the HF path
+  model_id: "girivinity-native"
   device_map: "auto"
   torch_dtype: "float16"
   load_in_4bit: true
@@ -18,18 +23,43 @@ model:
   n_ctx: 4096
   n_gpu_layers: 0
   architecture:
-  dim: 3072
-  n_layers: 28
-  n_heads: 24
-  n_kv_heads: 8
-  vocab_size: 32000
-  max_seq_len: 4096
-  ffn_multiplier: 2.667
-  norm_eps: 0.00001
-  rope_theta: 500000.0
+    vocab_size: 65536
+    max_seq_len: 32768
+    dim: 2048
+    n_layers: 24
+    n_heads: 16
+    n_kv_heads: 4
+    ffn_multiplier: 2.667
+    norm_eps: 0.00001
+    rope_theta: 500000.0
 
 rag:
   chroma_path: "data/chroma"
+
+compute:
+  # Auto-detects GPU at runtime. Set to "cpu" to force CPU-only mode.
+  # Set to "cuda" to require GPU (will error if not available).
+  device: "auto"
+
+  # Training settings per device type
+  training:
+    gpu:
+      use_amp: true              # Mixed precision (float16) on GPU
+      dataloader_num_workers: 4  # Parallel data loading on GPU
+      gradient_checkpointing: true
+    cpu:
+      use_amp: false             # AMP disabled on CPU
+      dataloader_num_workers: 0  # No multiprocessing on CPU
+      gradient_checkpointing: true  # Still useful to save RAM on CPU
+
+  # Inference settings
+  inference:
+    gpu:
+      load_in_4bit: true         # 4-bit NF4 quantization on GPU
+      torch_dtype: "float16"
+    cpu:
+      load_in_4bit: false        # No 4-bit on CPU (use GGUF instead)
+      torch_dtype: "float32"
 
 crawler:
   max_depth: 2
@@ -48,6 +78,30 @@ training:
   max_training_epochs: 1
   require_validation_dataset: true
   require_benchmark_improvement: true
+  pretrain:
+    data_path: "data/distillation/output.jsonl"
+    output_dir: "models/girivinity_pretrain"
+    batch_size: 2
+    learning_rate: 0.0003
+    warmup_steps: 100
+    max_steps: 1000
+    gradient_accumulation_steps: 8
+    checkpoint_every: 100
+    use_amp: true
+    use_fsdp: false
+    device: "auto"
+    model_config:
+      vocab_size: 65536
+      hidden_dim: 2048
+      num_heads: 16
+      num_layers: 24
+      ffn_dim: 8192
+      max_seq_len: 4096
+      dropout: 0.1
+      use_rope: true
+      use_gqa: true
+      num_kv_heads: 4
+      use_rmsnorm: true
 
 security:
   require_grounding: true
@@ -155,6 +209,7 @@ self_training:
 
 
 successor_engine:
+  current_generation: 1  # Generation 1 is now Girivinity-3B
   check_interval_seconds: 86400
   chunk_threshold: 100000
   quality_threshold: 3.5
@@ -172,7 +227,9 @@ successor_engine:
   learning_rate: 0.0002
   train_seq_len: 256
   eval_split: 0.1
-  device: "cpu"
+  device: "auto"
+  auto_quantize: true        # Quantize successor to GGUF after training
+  quant_type: "Q4_K_M"      # Quantization format for CPU inference
 
 
 skill_forge:

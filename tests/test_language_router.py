@@ -1,4 +1,4 @@
-from language_router import DictionaryTranslator, LanguageRouter
+from app.engines.language_router import DictionaryTranslator, LanguageRouter
 
 
 def test_detects_hindi_and_law_domain():
