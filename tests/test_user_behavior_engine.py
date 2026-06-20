@@ -1,6 +1,6 @@
 import pytest
 
-from user_behavior_engine import (
+from app.engines.user_behavior_engine import (
     AdTargetingSystem,
     PrivacyGuard,
     RecommendationSystem,

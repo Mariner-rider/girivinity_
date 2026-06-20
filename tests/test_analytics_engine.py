@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from analytics_engine import AnalyticsEngine
+from app.engines.analytics_engine import AnalyticsEngine
 
 
 def test_csv_db_ingestion_and_processing(tmp_path: Path):
