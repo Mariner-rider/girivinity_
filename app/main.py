@@ -205,3 +205,128 @@ async def v1_feedback(payload: dict = Body(...)):
         return {"stored": False, "reason": "FeedbackHarvester unavailable"}
     FeedbackHarvester().collect_explicit(payload["interaction_id"], int(payload["rating"]), payload.get("correction"), payload.get("user_id"))
     return {"stored": True}
+
+# --- adaptive agent platform endpoints --------------------------------------
+from dataclasses import asdict as _agent_asdict
+from fastapi import HTTPException, Query
+
+_adaptive_runtime: dict[str, Any] = {}
+
+
+def _get_agent_registry():
+    if "agent_registry" not in _adaptive_runtime:
+        from app.agents.agent_registry import AgentRegistry
+
+        _adaptive_runtime["agent_registry"] = AgentRegistry.from_config()
+    return _adaptive_runtime["agent_registry"]
+
+
+def _get_adaptive_executor():
+    if "adaptive_executor" not in _adaptive_runtime:
+        from agent_controller import LocalLLMEngine
+        from app.agents.adaptive_agent_executor import AdaptiveAgentExecutor, BasicToolRegistry, InMemoryRAG
+        from app.agents.capability_merger import CapabilityMerger
+        from app.security.policy import SecurityGuard
+
+        registry = _get_agent_registry()
+        merger = CapabilityMerger({"adaptive_agents": {"merge_threshold": 50}}, registry, None, SecurityGuard())
+        _adaptive_runtime["adaptive_executor"] = AdaptiveAgentExecutor(
+            LocalLLMEngine(), registry, merger, BasicToolRegistry(), InMemoryRAG()
+        )
+    return _adaptive_runtime["adaptive_executor"]
+
+
+@app.get("/v1/agents")
+async def v1_agents_list():
+    registry = _get_agent_registry()
+    return {"agents": [agent.to_dict() for agent in registry.list_all()]}
+
+
+@app.get("/v1/agents/search")
+async def v1_agents_search(q: str = Query(..., min_length=1)):
+    registry = _get_agent_registry()
+    return {"query": q, "agents": [agent.to_dict() for agent in registry.search(q)]}
+
+
+@app.post("/v1/agents")
+async def v1_agents_register(payload: dict = Body(...)):
+    from app.agents.agent_registry import AgentTypeDefinition
+
+    required = ["agent_type_id", "display_name", "description", "base_system_prompt"]
+    missing = [key for key in required if not payload.get(key)]
+    if missing:
+        raise HTTPException(status_code=422, detail={"missing": missing})
+    registry = _get_agent_registry()
+    agent_def = AgentTypeDefinition(
+        agent_type_id=str(payload["agent_type_id"]).strip().lower().replace(" ", "_"),
+        display_name=str(payload["display_name"]),
+        description=str(payload["description"]),
+        base_system_prompt=str(payload["base_system_prompt"]),
+        available_tools=[str(tool) for tool in payload.get("available_tools", [])],
+        adapter_path=str(payload.get("adapter_path") or f"models/adapters/{payload['agent_type_id']}/latest"),
+        capability_version=int(payload.get("capability_version", 1)),
+        user_count=int(payload.get("user_count", 0)),
+        tags=[str(tag).lower() for tag in payload.get("tags", [])],
+    )
+    registry.register(agent_def)
+    return {"registered": True, "agent": agent_def.to_dict()}
+
+
+@app.get("/v1/agents/{agent_type_id}")
+async def v1_agents_get(agent_type_id: str):
+    registry = _get_agent_registry()
+    agent = registry.get(agent_type_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail=f"Unknown agent type: {agent_type_id}")
+    return agent.to_dict()
+
+
+@app.post("/v1/agents/{agent_type_id}/run")
+async def v1_agents_run(agent_type_id: str, payload: dict = Body(...)):
+    user_id = payload.get("user_id")
+    task = payload.get("task")
+    if not user_id or not task:
+        raise HTTPException(status_code=422, detail="user_id and task are required")
+    executor = _get_adaptive_executor()
+    try:
+        return await executor.execute(agent_type_id, str(user_id), str(task), payload.get("user_context"))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/v1/agents/{agent_type_id}/stats")
+async def v1_agents_stats(agent_type_id: str):
+    registry = _get_agent_registry()
+    try:
+        return registry.stats(agent_type_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/agents/{agent_type_id}/feedback")
+async def v1_agents_feedback(agent_type_id: str, payload: dict = Body(...)):
+    registry = _get_agent_registry()
+    if registry.get(agent_type_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown agent type: {agent_type_id}")
+    user_id = str(payload.get("user_id") or "")
+    interaction_id = str(payload.get("interaction_id") or "")
+    rating = int(payload.get("rating", 0))
+    correction = str(payload.get("correction") or "")
+    if not user_id or not interaction_id or rating < 1 or rating > 5:
+        raise HTTPException(status_code=422, detail="user_id, interaction_id, and rating 1-5 are required")
+    example = {
+        "instruction": f"Improve response for interaction {interaction_id}",
+        "input": "",
+        "output": correction or f"User rated interaction {interaction_id} as {rating}/5.",
+        "quality_score": rating / 5.0,
+    }
+    delta_id = registry.submit_capability_delta(
+        user_id=user_id,
+        agent_type_id=agent_type_id,
+        delta_description=f"Feedback for interaction {interaction_id}: rating={rating}",
+        training_example=example,
+        quality_score=rating / 5.0,
+    )
+    if FeedbackHarvester is not None:
+        FeedbackHarvester().collect_explicit(interaction_id, rating, correction or None, user_id)
+    return {"stored": True, "delta_id": delta_id, "agent_type": agent_type_id, "rating": rating}
