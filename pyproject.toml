@@ -25,6 +25,10 @@ dependencies = [
   "sentence-transformers>=3.0.0",
   "chromadb>=0.5.0",
   "llama-cpp-python>=0.2.90",
+  "nvdlib>=0.7.7",
+  "tenacity>=8.2.3",
+  "mitreattack-python>=3.0.0",
+  "rank-bm25>=0.2.2",
 ]
 
 [project.optional-dependencies]
