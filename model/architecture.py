@@ -5,13 +5,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class GirivinityConfig:
-    dim: int = 1024
-    n_layers: int = 16
-    n_heads: int = 16
-    n_kv_heads: int = 4
+    dim: int = 3072
+    n_layers: int = 28
+    n_heads: int = 24
+    n_kv_heads: int = 8
     vocab_size: int = 32000
     max_seq_len: int = 4096
     ffn_multiplier: float = 2.667

@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 _INSTANCE = None
 _LOCK = threading.Lock()
 
+@dataclass(slots=True)
+class LoadedLLM:
+    model: Any
+    tokenizer: Any | None = None
+    use_native_model: bool = False
 
 class GirivinityLoader:
     def __init__(self) -> None:
