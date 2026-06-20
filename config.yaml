@@ -8,7 +8,7 @@ app:
   auto_load_model: false
 
 model:
-  model_id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+  model_id: "models/base"
   device_map: "auto"
   torch_dtype: "float16"
   load_in_4bit: true
@@ -68,7 +68,7 @@ modules:
     config_source: "config.yaml"
   llm:
     enabled: true
-    model_id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    model_id: "models/base"
     device_map: "auto"
     trust_remote_code: false
     attn_implementation: "sdpa"
