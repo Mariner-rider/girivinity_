@@ -8,12 +8,7 @@ app:
   auto_load_model: false
 
 model:
-  # Set true after running model/train.py to use Girivinity's own weights
-  use_native_model: false
-  # Path to a saved GirivinityModel checkpoint directory (config.json + pytorch_model.bin + tokenizer.json).
-  native_model_path: ""
-  # Set to 'girivinity-native' to use own trained model, or a HuggingFace model_id for the HF path
-  model_id: "girivinity-native"
+  model_id: "models/base"
   device_map: "auto"
   torch_dtype: "float16"
   load_in_4bit: true
