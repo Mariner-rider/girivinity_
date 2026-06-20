@@ -52,7 +52,7 @@ async def chat_message(req: ChatRequest):
         answer = "".join(answer)
 
     try:
-        from app.engines.analytics_engine import AnalyticsEngine
+        from app.core.analytics_engine import AnalyticsEngine
 
         AnalyticsEngine().log_query(
             user_id=req.user_id,

@@ -457,8 +457,21 @@ lora:
     - o_proj
   epochs: 3
   learning_rate: 0.0002
-  batch_size: 2
-  grad_accum: 8
-  max_seq_len: 2048
-  adapters_dir: models/adapters
-  loss_abort_threshold: 2.0
+  train_seq_len: 256
+  eval_split: 0.1
+  device: "cpu"
+
+
+skill_forge:
+  skills_dir: skills
+  db_path: data/skill_forge.db
+  min_chunks_to_generate: 3
+  max_skills_composed: 3
+
+
+cuda_engine:
+  nvcc_path: nvcc
+  cuda_std: c++17
+  arch: sm_80
+  max_compile_retries: 3
+  kernels_dir: data/cuda_kernels

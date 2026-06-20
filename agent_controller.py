@@ -166,19 +166,18 @@ class ResearchAgent(BaseAgent):
         task: str,
         memory: SharedMemory,
         mailbox: list[AgentMessage],
-        rag_results: list[dict[str, Any]],
-        user_model: Any | None,
-        episodes: list[Any],
-    ) -> str:
-        return "\n\n".join(
-            [
-                self.system_prompt(user_model),
-                self._format_user_context(user_model),
-                self._format_episodes(episodes),
-                self._format_rag_context(rag_results),
-                f"## Task\n{task}",
-            ]
-        )
+        hidden_scratchpad: list[str],
+    ) -> AgentResult:
+        hidden_scratchpad.append(f"Researching task: {task}")
+        try:
+            from app.core.query_router import QueryRouter
+            result = QueryRouter().route(task)
+            findings = result["context_string"] or f"No data found for: {task}"
+        except Exception as exc:
+            findings = f"Research error for '{task}': {exc}"
+        memory.add_fact(findings)
+        mailbox.append(AgentMessage(self.name, "reasoning_agent", findings))
+        return AgentResult(self.name, findings, confidence=result["confidence"], citations=result["urls"])
 
     def parse_response(self, raw: str) -> dict[str, Any]:
         parsed = self._safe_json_parse(raw)

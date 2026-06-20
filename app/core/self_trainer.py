@@ -116,7 +116,7 @@ class SelfTrainer:
         if not self.base_model.exists():
             logger.warning(
                 "Base model not found at %s — skipping. "
-                "Build it first with: python -m app.training.pretrain --config config.yaml",
+                "Build it first with: python model/architecture.py",
                 self.base_model,
             )
             return False
@@ -133,35 +133,12 @@ class SelfTrainer:
                 TrainingArguments,
             )
 
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            on_gpu = device.type == "cuda"
-            if on_gpu:
-                free_vram, _total_vram = torch.cuda.mem_get_info()
-                if free_vram < 4 * 1024**3:
-                    logger.warning(
-                        "GPU has %.1fGB free VRAM (<4GB); falling back to CPU for LoRA training",
-                        free_vram / 1e9,
-                    )
-                    device = torch.device("cpu")
-                    on_gpu = False
-            if on_gpu:
-                logger.info("Training on GPU: %s", torch.cuda.get_device_name(0))
-            else:
-                logger.info("Training on CPU — this will be slow, consider a GPU instance")
-
-            scaler = torch.cuda.amp.GradScaler(enabled=on_gpu)
-            _ = scaler
-
             tokenizer = AutoTokenizer.from_pretrained(str(self.base_model))
-            model = AutoModelForCausalLM.from_pretrained(
-                str(self.base_model),
-                torch_dtype=torch.float16 if on_gpu else torch.float32,
-                device_map=None,
-            ).to(device)
+            model = AutoModelForCausalLM.from_pretrained(str(self.base_model), torch_dtype=torch.float32)
 
             latest = self.adapters_dir / "latest"
             if latest.exists() and latest.is_symlink():
-                model = PeftModel.from_pretrained(model, str(latest)).to(device)
+                model = PeftModel.from_pretrained(model, str(latest))
             else:
                 model = get_peft_model(
                     model,
@@ -172,7 +149,7 @@ class SelfTrainer:
                         lora_dropout=0.05,
                         task_type=TaskType.CAUSAL_LM,
                     ),
-                ).to(device)
+                )
 
             records = []
             with open(dataset_path, encoding="utf-8") as f:
@@ -197,9 +174,6 @@ class SelfTrainer:
                     learning_rate=self.lr,
                     logging_steps=10,
                     save_strategy="no",
-                    fp16=on_gpu,
-                    dataloader_num_workers=4 if on_gpu else 0,
-                    no_cuda=not on_gpu,
                     report_to="none",
                 ),
                 train_dataset=tokenized,
@@ -220,9 +194,6 @@ class SelfTrainer:
         except Exception as exc:
             logger.error("LoRA update failed: %s", exc)
             return False
-        finally:
-            if "on_gpu" in locals() and on_gpu:
-                torch.cuda.empty_cache()
 
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

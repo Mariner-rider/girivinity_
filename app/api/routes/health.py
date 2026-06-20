@@ -28,23 +28,7 @@ async def health_deep():
         chromadb.PersistentClient(path=cfg["rag"]["chroma_path"])
     except Exception as exc:
         issues.append(f"chromadb: {exc}")
-
-    try:
-        from llm_engine import LLMEngine
-
-        compute = LLMEngine().get_device_info()
-    except Exception as exc:
-        compute = {
-            "device": "cpu",
-            "gpu_name": None,
-            "gpu_vram_total_gb": None,
-            "gpu_vram_free_gb": None,
-            "inference_mode": "float32_cpu",
-            "error": str(exc),
-        }
-
     return {
         "status": "ok" if not issues else "degraded",
         "issues": issues,
-        "compute": compute,
     }
