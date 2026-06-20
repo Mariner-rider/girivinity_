@@ -18,6 +18,8 @@ from app.api.routes.chat import router as chat_router
 from app.api.routes.health import router as health_router
 from app.api.routes.skills import router as skills_router
 from app.api.routes.cuda import router as cuda_router
+from app.security.rasp import RASPEngine
+from app.security.rasp_api import rasp_router
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,8 @@ async def lifespan(_: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level, structured=settings.structured_logging)
     _llm_runtime["config"] = get_system_config()
+    app.state.rasp = RASPEngine(config={"security": getattr(settings, "security", {})})
+    app.state.rasp_engine = app.state.rasp
     _start_self_trainer_once()
     if settings.auto_load_model:
         _llm_runtime["runtime"] = GirivinityLoader().get_model()
@@ -43,6 +47,7 @@ app.include_router(health_router)
 app.include_router(admin_router)
 app.include_router(skills_router)
 app.include_router(cuda_router)
+app.include_router(rasp_router)
 
 
 def _start_self_trainer_once() -> None:
