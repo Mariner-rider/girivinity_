@@ -285,24 +285,6 @@ class LLMEngine:
         output_ids = self._hf_model.generate(**inputs, max_new_tokens=max_tokens)
         return str(self._tokenizer.decode(output_ids[0], skip_special_tokens=True))
 
-    def stream(self, prompt: str, max_tokens: int = 512) -> Iterator[str]:
-        return self._stream(prompt, max_tokens)
-
-    def generate_with_context(
-        self,
-        question: str,
-        context: str,
-        user_level: int = 1,
-        max_tokens: int = 512,
-    ) -> Iterator[str] | str:
-        prompt = (
-            f"User level: {user_level}\n"
-            f"Context:\n{context}\n\n"
-            f"Question: {question}\n"
-            "Answer:"
-        )
-        return self.generate(prompt, max_tokens=max_tokens, stream=True)
-
     def _stream(self, prompt: str, max_tokens: int) -> Iterator[str]:
         if self.backend not in {"llama_cpp", "hybrid"}:
             yield self._generate_text(prompt, max_tokens)
