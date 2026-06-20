@@ -1,120 +1,316 @@
+# ============================================================
+# GIRIVINITY — MASTER CONFIGURATION
+# ============================================================
+
 app:
   name: "Girivinity"
-  environment: "dev"
+  version: "3.0.0"
+  environment: "production"
   host: "0.0.0.0"
   port: 8000
   log_level: "INFO"
   structured_logging: true
   auto_load_model: false
 
+# ============================================================
+# MODEL — Hardware-adaptive, generation-aware
+# ============================================================
 model:
-  # Set true after running model/train.py to use Girivinity's own weights
-  use_native_model: false
-  # Path to a saved GirivinityModel checkpoint directory (config.json + pytorch_model.bin + tokenizer.json).
-  native_model_path: ""
-  # Set to 'girivinity-native' to use own trained model, or a HuggingFace model_id for the HF path
-  model_id: "girivinity-native"
+  # Current generation
+  generation: 1
+  parameter_scale: "3B"            # 3B → 7B → 13B → 34B → 70B
+  backend: "hybrid"                # "transformers" | "llama_cpp" | "hybrid"
+
+  # HuggingFace model (used when backend = transformers or hybrid embedding)
+  model_id: "microsoft/Phi-3-mini-4k-instruct"
+
+  # GGUF model (used when backend = llama_cpp or hybrid generation)
+  gguf_path: "models/gguf/girivinity-q4_k_m.gguf"
+  quantised_path: "models/gguf/girivinity-q4_k_m.gguf"
+  base_model_path: "models/base"
+
+  # Hardware settings
   device_map: "auto"
+  n_gpu_layers: -1                 # -1 = all layers on GPU if VRAM sufficient
+  n_ctx: 4096
+  n_threads: 8
+  n_batch: 512
+  use_mlock: true
+  flash_attention: true
+  rope_scaling: "dynamic"
+
+  # Quantization
   torch_dtype: "float16"
   load_in_4bit: true
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_use_double_quant: true
+  bnb_4bit_compute_dtype: "float16"
   kv_cache: true
-  base_model_path: "models/base"
-  quantised_path: "models/girivinity_quantised/girivinity-q4_k_m.gguf"
-  n_ctx: 4096
-  n_gpu_layers: 0
+  trust_remote_code: false
+  attn_implementation: "flash_attention_2"
+
+  # Architecture (current generation — 3B Phi-3-mini spec)
   architecture:
-    vocab_size: 65536
-    max_seq_len: 32768
-    dim: 2048
-    n_layers: 24
-    n_heads: 16
-    n_kv_heads: 4
+    dim: 3072
+    n_layers: 32
+    n_heads: 32
+    n_kv_heads: 8
+    vocab_size: 32064
+    max_seq_len: 4096
     ffn_multiplier: 2.667
-    norm_eps: 0.00001
-    rope_theta: 500000.0
+    rope_theta: 10000.0
 
+  # Scaling ladder — used by successor engine to provision next generation
+  scaling_ladder:
+    - { generation: 1, param_label: "3B",  n_layers: 32,  dim: 3072,  n_heads: 32 }
+    - { generation: 2, param_label: "7B",  n_layers: 32,  dim: 4096,  n_heads: 32 }
+    - { generation: 3, param_label: "13B", n_layers: 40,  dim: 5120,  n_heads: 40 }
+    - { generation: 4, param_label: "34B", n_layers: 60,  dim: 7168,  n_heads: 56 }
+    - { generation: 5, param_label: "70B", n_layers: 80,  dim: 8192,  n_heads: 64 }
+
+# ============================================================
+# MULTIMODAL — Natively fused modalities
+# ============================================================
+multimodal:
+  enabled: true
+  fusion_mode: "cross_attention"   # "concat" | "cross_attention" | "gated"
+
+  image:
+    enabled: true
+    encoder: "openai/clip-vit-large-patch14"
+    encoder_dim: 1024              # CLIP ViT-L output dim
+    projection_dim: 3072           # must match model.architecture.dim
+    patch_size: 14
+    image_size: 224
+    max_image_tokens: 256
+    projection_checkpoint: "models/multimodal/vision_projection.pt"
+
+  audio:
+    enabled: true
+    encoder: "whisper"
+    whisper_size: "base"           # "tiny" | "base" | "small" | "medium"
+    encoder_dim: 512               # Whisper base encoder output dim
+    projection_dim: 3072
+    max_audio_tokens: 32           # Pooled audio representation
+    projection_checkpoint: "models/multimodal/audio_projection.pt"
+
+  video:
+    enabled: true
+    frame_sample_rate: 1           # 1 frame per second
+    max_frames: 8
+    reuse_image_encoder: true      # Each frame goes through image encoder
+
+  code:
+    enabled: true
+    syntax_tokenizer: "pygments"   # Syntax-aware tokenization before encoding
+
+  fusion:
+    n_heads: 12
+    n_cross_attention_layers: 2
+    checkpoint: "models/multimodal/fusion_layer.pt"
+
+# ============================================================
+# COGNITIVE INTELLIGENCE LAYER
+# ============================================================
+cognition:
+  enabled: true
+
+  theory_of_mind:
+    enabled: true
+    user_model_window: 20          # Last N turns to model user state
+    infer_expertise_level: true    # Adapt vocabulary/depth per user
+    infer_emotional_state: true
+
+  causal_reasoning:
+    enabled: true
+    chain_of_thought_steps: 5      # Force N reasoning steps before answering
+    counterfactual_check: true     # "What if X were false?" sanity check
+
+  metacognition:
+    enabled: true
+    uncertainty_threshold: 0.35    # Below this confidence → express uncertainty
+    refusal_threshold: 0.15        # Below this → refuse and ask for clarification
+    calibration_file: "data/calibration.json"
+
+  episodic_memory:
+    enabled: true
+    backend: "faiss"
+    max_episodes_per_user: 500
+    episode_decay_days: 90         # Older episodes weighted less
+    cross_session_recall: true
+
+  social_adaptability:
+    enabled: true
+    tone_modes:
+      - "formal"
+      - "casual"
+      - "empathetic"
+      - "technical"
+      - "instructional"
+    auto_detect_tone: true
+    adapt_vocabulary_complexity: true
+
+# ============================================================
+# SENTIMENT & EMOTION ENGINE
+# ============================================================
+sentiment:
+  enabled: true
+  backend: "hybrid"               # vader (fast) + transformer (deep)
+  transformer_model: "cardiffnlp/twitter-roberta-base-sentiment-latest"
+  emotion_classes:
+    - "joy"
+    - "sadness"
+    - "anger"
+    - "fear"
+    - "surprise"
+    - "disgust"
+    - "confusion"
+    - "frustration"
+    - "curiosity"
+    - "urgency"
+  crisis_detection: true           # Detect distress signals, escalate carefully
+  response_adaptation: true        # Modify response tone based on detected emotion
+
+# ============================================================
+# RAG — Embedding-based with hybrid retrieval
+# ============================================================
 rag:
+  backend: "faiss"
   chroma_path: "data/chroma"
+  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+  embedding_dim: 384
+  top_k: 8
+  hybrid_retrieval: true           # Combine dense (FAISS) + sparse (BM25)
+  bm25_weight: 0.3
+  dense_weight: 0.7
+  reranker: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  use_reranker: true
+  max_context_chars: 4000
+  require_sources: true
+  metadata_filters: true           # Filter by source_type, date, domain
 
-compute:
-  # Auto-detects GPU at runtime. Set to "cpu" to force CPU-only mode.
-  # Set to "cuda" to require GPU (will error if not available).
-  device: "auto"
+# ============================================================
+# CYBERSECURITY DOMAIN
+# ============================================================
+cybersecurity:
+  enabled: true
+  nvd_api_key: "${NVD_API_KEY}"
+  nvd_sync_interval_hours: 6
+  mitre_attack_version: "14.1"
+  ioc_feeds:
+    - "https://feodotracker.abuse.ch/downloads/ipblocklist.csv"
+    - "https://urlhaus.abuse.ch/downloads/csv_recent/"
+    - "https://threatfox.abuse.ch/export/csv/recent/"
+  semgrep_rules: "p/security-audit"
+  bandit_severity: "MEDIUM"
+  sandbox:
+    backend: "docker"
+    image: "python:3.11-slim"
+    timeout_seconds: 15
+    network: "none"
+    memory_limit: "128m"
+    cpu_quota: 10000
 
-  # Training settings per device type
-  training:
-    gpu:
-      use_amp: true              # Mixed precision (float16) on GPU
-      dataloader_num_workers: 4  # Parallel data loading on GPU
-      gradient_checkpointing: true
-    cpu:
-      use_amp: false             # AMP disabled on CPU
-      dataloader_num_workers: 0  # No multiprocessing on CPU
-      gradient_checkpointing: true  # Still useful to save RAM on CPU
+# ============================================================
+# SELF-IMPROVEMENT — Closed autonomous loop
+# ============================================================
+self_improvement:
+  enabled: true
+  crawler_interval_seconds: 3600
+  distill_batch_size: 100
+  lora_trigger_threshold: 200
+  eval_metric: "perplexity"
+  min_improvement_delta: 0.005
+  adapter_hot_swap: true
+  reward_model: "llm_as_judge"
 
-  # Inference settings
-  inference:
-    gpu:
-      load_in_4bit: true         # 4-bit NF4 quantization on GPU
-      torch_dtype: "float16"
-    cpu:
-      load_in_4bit: false        # No 4-bit on CPU (use GGUF instead)
-      torch_dtype: "float32"
+# ============================================================
+# SUCCESSOR ENGINE — Autonomous scaling to next generation
+# ============================================================
+successor_engine:
+  enabled: true
+  check_interval_seconds: 86400
+  chunk_threshold: 100000          # Distilled chunks needed to trigger scaling
+  quality_threshold: 3.5           # Mean quality score needed
+  feedback_window: 1000
+  auto_provision: true             # Automatically start next-gen training
+  knowledge_transfer: true         # Distil current model into next-gen seed data
+  versions_dir: "models/versions"
+  active_model_symlink: "models/active"
+  notifications_path: "admin_notifications.jsonl"
+  state_path: "data/successor_state.json"
+  trained_collection: "trained"
+  chroma_path: null
+  feedback_db_path: "data/user_feedback.sqlite3"
+  training_root: "data/successor_training"
+  # Training config for next-gen provisioning
+  batch_size: 4
+  epochs: 3
+  learning_rate: 0.0001
+  train_seq_len: 512
+  eval_split: 0.1
+  device: "cpu"
 
+# ============================================================
+# CRAWLER
+# ============================================================
 crawler:
-  max_depth: 2
-  concurrent_requests: 32
-  download_timeout_seconds: 15
+  max_depth: 100
+  concurrent_requests: 3200000
+  download_timeout_seconds: 20
   trust_threshold: 0.6
   obey_robots_txt: true
+  use_playwright: true             # JS-rendered page support
+  security_sources_enabled: true
 
+# ============================================================
+# TRAINING (LoRA)
+# ============================================================
 training:
+  method: "lora"
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
   queue_db: "data/training_queue.sqlite3"
   check_interval_minutes: 30
   min_batch_size: 50
   epochs: 3
+  learning_rate: 0.0002
+  max_length: 1024
   min_validation_samples: 1
-  min_benchmark_delta: 0.0
   max_training_epochs: 1
   require_validation_dataset: true
   require_benchmark_improvement: true
-  pretrain:
-    data_path: "data/distillation/output.jsonl"
-    output_dir: "models/girivinity_pretrain"
-    batch_size: 2
-    learning_rate: 0.0003
-    warmup_steps: 100
-    max_steps: 1000
-    gradient_accumulation_steps: 8
-    checkpoint_every: 100
-    use_amp: true
-    use_fsdp: false
-    device: "auto"
-    model_config:
-      vocab_size: 65536
-      hidden_dim: 2048
-      num_heads: 16
-      num_layers: 24
-      ffn_dim: 8192
-      max_seq_len: 4096
-      dropout: 0.1
-      use_rope: true
-      use_gqa: true
-      num_kv_heads: 4
-      use_rmsnorm: true
+  min_benchmark_delta: 0.0
+  adapters_dir: "models/adapters"
+  latest_adapter_path: "models/adapters/latest"
 
+# ============================================================
+# SECURITY
+# ============================================================
 security:
   require_grounding: true
-  require_trusted_crawler_urls: true
-  prompt_max_chars: 12000
+  prompt_max_chars: 16000
   allow_remote_code: false
+  require_trusted_crawler_urls: true
+  audit_log_path: "logs/audit.jsonl"
+  rate_limit_rpm: 60
 
+# ============================================================
+# FEATURE FLAGS
+# ============================================================
 feature_flags:
   enable_rag: true
   enable_crawler: true
   enable_training: true
-  enable_multimodal: false
+  enable_multimodal: true
   enable_analytics: true
+  enable_cognition: true
+  enable_sentiment: true
+  enable_cybersecurity: true
+  enable_successor_engine: true
+  enable_episodic_memory: true
 
 modules:
   core:
@@ -122,10 +318,10 @@ modules:
     config_source: "config.yaml"
   llm:
     enabled: true
-    model_id: "models/base"
+    model_id: "microsoft/Phi-3-mini-4k-instruct"
     device_map: "auto"
     trust_remote_code: false
-    attn_implementation: "sdpa"
+    attn_implementation: "flash_attention_2"
     torch_dtype: "float16"
     kv_cache: true
     load_in_4bit: true
@@ -147,13 +343,13 @@ modules:
   crawler:
     enabled: true
     obey_robots_txt: true
-    concurrent_requests: 32
-    max_depth: 2
+    concurrent_requests: 3200000
+    max_depth: 100
     trust_threshold: 0.6
   rag:
     enabled: true
-    top_k: 4
-    max_context_chars: 2500
+    top_k: 8
+    max_context_chars: 4000
     require_sources: true
   security:
     enabled: true
@@ -166,8 +362,8 @@ modules:
   multimodal:
     enabled: true
     text: true
-    images: false
-    audio: false
+    images: true
+    audio: true
   training:
     enabled: true
     method: "lora"
@@ -196,9 +392,9 @@ self_training:
   event_log_path: "logs/self_training.jsonl"
   alerts_log_path: "logs/alerts.jsonl"
   base_model_path: "models/base"
-  quantised_path: "models/girivinity_quantised/girivinity-q4_k_m.gguf"
+  quantised_path: "models/gguf/girivinity-q4_k_m.gguf"
   n_ctx: 4096
-  n_gpu_layers: 0
+  n_gpu_layers: -1
   latest_adapter_path: "models/adapters/latest"
   adapters_dir: "models/adapters"
   epochs: 5
@@ -207,23 +403,59 @@ self_training:
   batch_size: 2
   max_length: 1024
 
+skill_forge:
+  skills_dir: skills
+  db_path: data/skill_forge.db
+  min_chunks_to_generate: 3
+  max_skills_composed: 3
 
-successor_engine:
-  current_generation: 1  # Generation 1 is now Girivinity-3B
-  check_interval_seconds: 86400
-  chunk_threshold: 100000
-  quality_threshold: 3.5
-  feedback_window: 1000
-  trained_collection: "trained"
-  chroma_path: null
-  feedback_db_path: "data/user_feedback.sqlite3"
-  training_root: "data/successor_training"
-  versions_dir: "models/versions"
-  active_model_symlink: "models/active"
-  notifications_path: "admin_notifications.jsonl"
-  state_path: "data/successor_state.json"
-  batch_size: 2
-  epochs: 1
+cuda_engine:
+  nvcc_path: nvcc
+  cuda_std: c++17
+  arch: sm_80
+  max_compile_retries: 3
+  kernels_dir: data/cuda_kernels
+
+database:
+  host: localhost
+  port: 5432
+  name: girivinity
+  user: girivinity_user
+  password: changeme
+  pool_min_conn: 2
+  pool_max_conn: 10
+
+domain_training:
+  data_dir: data/domain_training
+  target_tokens_per_domain: 5000000
+  finetune_epochs: 3
+  finetune_lr: 0.00005
+  finetune_batch_size: 2
+  grad_accum: 16
+  max_seq_len: 2048
+  output_dir: models/domain_finetuned
+
+architecture:
+  dim: 3072
+  n_layers: 32
+  n_heads: 32
+  n_kv_heads: 8
+  vocab_size: 32064
+  max_seq_len: 4096
+  ffn_multiplier: 2.667
+  norm_eps: 0.00001
+  rope_theta: 10000.0
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - v_proj
+    - k_proj
+    - o_proj
+  epochs: 3
   learning_rate: 0.0002
   train_seq_len: 256
   eval_split: 0.1
