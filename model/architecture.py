@@ -5,10 +5,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class GirivinityConfig:
-    # Girivinity 3B — ~2.92B parameters
     dim: int = 3072
     n_layers: int = 28
     n_heads: int = 24

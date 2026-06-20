@@ -104,7 +104,6 @@ class LLMSynthesiser:
         skill_block = ""
         try:
             from app.core.skill_forge import SkillForge
-
             skill = SkillForge().get_skill_for_query(query)
             if skill:
                 skill_block = f"\n\n{skill.to_prompt_block()}"
