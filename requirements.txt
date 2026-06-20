@@ -49,6 +49,7 @@ stix2>=3.0.1                     # STIX/TAXII threat intel format
 scrapy>=2.11.0
 playwright>=1.43.0
 trafilatura>=1.9.0
+spacy>=3.7.0
 llama-cpp-python>=0.2.77
 bitsandbytes>=0.43.0
 accelerate>=0.29.0

@@ -53,41 +53,6 @@ model:
     norm_eps: 0.00001
     rope_theta: 500000.0
 
-  fusion:
-    n_heads: 12
-    n_cross_attention_layers: 2
-    checkpoint: "models/multimodal/fusion_layer.pt"
-
-# ============================================================
-# COGNITIVE INTELLIGENCE LAYER
-# ============================================================
-cognition:
-  enabled: true
-
-  theory_of_mind:
-    enabled: true
-    user_model_window: 20          # Last N turns to model user state
-    infer_expertise_level: true    # Adapt vocabulary/depth per user
-    infer_emotional_state: true
-
-  causal_reasoning:
-    enabled: true
-    chain_of_thought_steps: 5      # Force N reasoning steps before answering
-    counterfactual_check: true     # "What if X were false?" sanity check
-
-  metacognition:
-    enabled: true
-    uncertainty_threshold: 0.35    # Below this confidence → express uncertainty
-    refusal_threshold: 0.15        # Below this → refuse and ask for clarification
-    calibration_file: "data/calibration.json"
-
-  episodic_memory:
-    enabled: true
-    backend: "faiss"
-    max_episodes_per_user: 500
-    episode_decay_days: 90         # Older episodes weighted less
-    cross_session_recall: true
-
   social_adaptability:
     enabled: true
     tone_modes:
@@ -159,6 +124,31 @@ cybersecurity:
     network: "none"
     memory_limit: "128m"
     cpu_quota: 10000
+
+compute:
+  # Auto-detects GPU at runtime. Set to "cpu" to force CPU-only mode.
+  # Set to "cuda" to require GPU (will error if not available).
+  device: "auto"
+
+  # Training settings per device type
+  training:
+    gpu:
+      use_amp: true              # Mixed precision (float16) on GPU
+      dataloader_num_workers: 4  # Parallel data loading on GPU
+      gradient_checkpointing: true
+    cpu:
+      use_amp: false             # AMP disabled on CPU
+      dataloader_num_workers: 0  # No multiprocessing on CPU
+      gradient_checkpointing: true  # Still useful to save RAM on CPU
+
+  # Inference settings
+  inference:
+    gpu:
+      load_in_4bit: true         # 4-bit NF4 quantization on GPU
+      torch_dtype: "float16"
+    cpu:
+      load_in_4bit: false        # No 4-bit on CPU (use GGUF instead)
+      torch_dtype: "float32"
 
 compute:
   # Auto-detects GPU at runtime. Set to "cpu" to force CPU-only mode.
