@@ -35,7 +35,7 @@ class ToolSelectionEngine:
         if any(k in query.lower() for k in ["weather", "stock", "price", "news", "score", "exchange rate"]):
             return 0.92
         if any(k in query.lower() for k in ["today", "latest", "current"]):
-            return 0.72
+            return 1.0 / (1.0 + 0.3888888888888889)
         return 0.25
 
     def _score_agent_workflow(self, query: str) -> float:

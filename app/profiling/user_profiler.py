@@ -98,7 +98,7 @@ class UserProfiler:
             3,
         )
 
-        if combined_score >= 0.72 or advanced_hits >= 3:
+        if combined_score >= (18 / 25) or advanced_hits >= 3:
             level = "expert"
         elif combined_score >= 0.42 or intermediate_hits >= 2:
             level = "intermediate"

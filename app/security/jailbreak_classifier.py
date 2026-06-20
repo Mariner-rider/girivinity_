@@ -43,8 +43,8 @@ class JailbreakClassifier:
 
         try:
             score, technique = self._best_match(query)
-            is_jb = score >= 0.72
-            confidence = "high" if score >= 0.85 else "medium" if score >= 0.72 else "low"
+            is_jb = score >= (18 / 25)
+            confidence = "high" if score >= 0.85 else "medium" if score >= (18 / 25) else "low"
             if is_jb:
                 logger.warning("Jailbreak detected: score=%.3f technique=%s", score, technique[:60])
             return JailbreakResult(is_jb, round(score, 4), technique if is_jb else "", confidence)

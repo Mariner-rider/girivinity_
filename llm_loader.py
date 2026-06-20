@@ -104,6 +104,14 @@ class LLMEngineConfig(ModelConfig):
     name while sharing the same model-loading fields.
     """
 
+    backend: str = "auto"
+    gguf_path: str = ""
+    n_gpu_layers: int = -1
+    n_ctx: int = 4096
+    n_threads: int = 8
+    max_new_tokens: int = 512
+    temperature: float = 0.2
+
 
 GirivinityLoaderConfig = ModelConfig
 
