@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,6 +12,7 @@ import faiss  # type: ignore
 import numpy as np
 import requests
 import yaml
+from app.core import db
 try:
     from bs4 import BeautifulSoup
 except ModuleNotFoundError:
@@ -161,21 +161,17 @@ class KnowledgeIngestionPipeline:
                     queue.append((nxt, depth + 1))
         return pages
 
-    def _init_db(self) -> sqlite3.Connection:
-        self.chunk_db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.chunk_db_path)
-        conn.execute(
+    def _init_db(self) -> None:
+        db.execute(
             """
             CREATE TABLE IF NOT EXISTS chunks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 url TEXT NOT NULL,
                 chunk_text TEXT NOT NULL,
                 timestamp TEXT NOT NULL
             )
             """
         )
-        conn.commit()
-        return conn
 
     def _append_to_faiss(self, vectors: np.ndarray) -> None:
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -206,10 +202,9 @@ class KnowledgeIngestionPipeline:
         self._append_to_faiss(vectors)
 
         now = datetime.now(timezone.utc).isoformat()
-        with self._init_db() as conn:
-            conn.executemany(
-                "INSERT INTO chunks(url, chunk_text, timestamp) VALUES (?, ?, ?)",
-                [(url, chunk, now) for url, chunk in all_chunks],
-            )
-            conn.commit()
+        self._init_db()
+        db.executemany(
+            "INSERT INTO chunks(url, chunk_text, timestamp) VALUES (%s, %s, %s)",
+            [(url, chunk, now) for url, chunk in all_chunks],
+        )
         return len(all_chunks)

@@ -1,6 +1,6 @@
 import json
 
-from response_planning_engine import ResponsePlanningSystem
+from app.engines.response_planning_engine import ResponsePlanningSystem
 
 
 def test_response_planner_code_blueprint():
