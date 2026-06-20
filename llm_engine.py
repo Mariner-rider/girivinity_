@@ -20,6 +20,8 @@ from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
+logger = logging.getLogger(__name__)
+
 
 class GirivinityEngine:
     def __init__(self, loader: GirivinityLoader | None = None) -> None:
