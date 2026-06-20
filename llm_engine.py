@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterator
 
 from llm_loader import GirivinityLoader, LLMEngineConfig
@@ -12,6 +14,23 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class _NativeGeneration:
     text: str
+
+
+@dataclass(slots=True)
+class GenerationMetrics:
+    latency_ms: float
+    completion_tokens: int
+    used_gpu: bool
+
+
+class GenerationResult(str):
+    """String-compatible generation result with structured metadata."""
+
+    def __new__(cls, text: str, metrics: GenerationMetrics | None = None):
+        obj = str.__new__(cls, text)
+        obj.text = text
+        obj.metrics = metrics
+        return obj
 
 
 class LLMEngine:
@@ -33,13 +52,64 @@ class LLMEngine:
         self.used_gpu = requested_device != "cpu" and self._cuda_available()
         self.device = "cuda" if self.used_gpu else "cpu"
         self._loaded = False
+        self._active_backend = "transformers"
+        self._llama: Any | None = None
+
+    @classmethod
+    def auto_detect_backend(cls, config: LLMEngineConfig) -> str:
+        backend = getattr(config, "backend", "auto")
+        if backend != "auto":
+            return backend
+        try:
+            import GPUtil
+
+            gpus = GPUtil.getGPUs()
+            has_gpu_vram = any(getattr(g, "memoryTotal", 0) >= 4096 for g in gpus)
+        except Exception:
+            has_gpu_vram = False
+        gguf_path = str(getattr(config, "gguf_path", "") or getattr(config, "quantised_path", "") or "")
+        has_gguf = bool(gguf_path and Path(gguf_path).exists())
+        if has_gpu_vram and has_gguf:
+            return "llama_cpp"
+        if has_gpu_vram:
+            return "transformers"
+        return "llama_cpp" if has_gguf else "transformers"
 
     def load(self) -> "LLMEngine":
+        backend = self.auto_detect_backend(self.config)
+        self._active_backend = backend
+        if backend == "llama_cpp":
+            return self._load_llama_cpp()
+        return self._load_transformers()
+
+    def _load_transformers(self) -> "LLMEngine":
         loaded = self._loader.load()
         self.model = loaded.model
         self.tokenizer = loaded.tokenizer
         self.use_native_model = loaded.use_native_model
         self._configure_device()
+        self._loaded = True
+        return self
+
+    def _load_llama_cpp(self) -> "LLMEngine":
+        try:
+            from llama_cpp import Llama
+        except Exception as exc:
+            logger.warning("llama_cpp backend requested but unavailable; falling back to transformers: %s", exc)
+            self._active_backend = "transformers"
+            return self._load_transformers()
+        gguf_path = str(getattr(self.config, "gguf_path", "") or getattr(self.config, "quantised_path", ""))
+        if not gguf_path:
+            raise RuntimeError("llama_cpp backend requires config.gguf_path or config.quantised_path")
+        self._llama = Llama(
+            model_path=gguf_path,
+            n_gpu_layers=int(getattr(self.config, "n_gpu_layers", -1)),
+            n_ctx=int(getattr(self.config, "n_ctx", 4096)),
+            n_threads=int(getattr(self.config, "n_threads", 8)),
+            verbose=False,
+        )
+        self.used_gpu = int(getattr(self.config, "n_gpu_layers", -1)) != 0
+        self.device = "cuda" if self.used_gpu else "cpu"
         self._loaded = True
         return self
 
@@ -75,6 +145,10 @@ class LLMEngine:
         **generation_kwargs: Any,
     ) -> Iterator[str] | str:
         self._ensure_loaded()
+        if getattr(self, "_active_backend", "transformers") == "llama_cpp":
+            if stream:
+                return self.stream(prompt, max_tokens=max_tokens, **generation_kwargs)
+            return self._generate_llama_cpp(prompt, max_tokens=max_tokens, **generation_kwargs)
         if stream:
             return self.stream(prompt, max_tokens=max_tokens, **generation_kwargs)
 
@@ -89,6 +163,17 @@ class LLMEngine:
         **generation_kwargs: Any,
     ) -> Iterator[str]:
         self._ensure_loaded()
+        if getattr(self, "_active_backend", "transformers") == "llama_cpp":
+            llama = getattr(self, "_llama", None)
+            if llama is None:
+                return
+            max_new = generation_kwargs.get("max_new_tokens", max_tokens)
+            temperature = generation_kwargs.get("temperature", getattr(self.config, "temperature", 0.2))
+            for chunk in llama(prompt, max_tokens=max_new, temperature=temperature, stream=True):
+                token = chunk.get("choices", [{}])[0].get("text", "")
+                if token:
+                    yield token
+            return
         if self.use_native_model:
             text = self._generate_native(prompt, max_tokens, **generation_kwargs).text
             if text:
@@ -98,6 +183,22 @@ class LLMEngine:
         text = self._generate_huggingface(prompt, max_tokens, **generation_kwargs)
         if text:
             yield text
+
+
+    def _generate_llama_cpp(self, prompt: str, **overrides: Any) -> GenerationResult:
+        llama = getattr(self, "_llama", None)
+        if llama is None:
+            raise RuntimeError("llama_cpp backend is not loaded")
+        start = time.perf_counter()
+        max_tokens = int(overrides.get("max_new_tokens", overrides.get("max_tokens", getattr(self.config, "max_new_tokens", 512))))
+        temperature = float(overrides.get("temperature", getattr(self.config, "temperature", 0.2)))
+        output = llama(prompt, max_tokens=max_tokens, temperature=temperature, echo=False)
+        choice = (output.get("choices") or [{}])[0]
+        text = str(choice.get("text", ""))
+        usage = output.get("usage") or {}
+        tokens = int(usage.get("completion_tokens", len(text.split())))
+        latency = round((time.perf_counter() - start) * 1000, 3)
+        return GenerationResult(text=text, metrics=GenerationMetrics(latency, tokens, self.used_gpu))
 
     def _generate_native(
         self,
@@ -140,34 +241,36 @@ class LLMEngine:
 
 
     def get_token_entropy(self, prompt: str = "", text: str | None = None) -> float:
-        """Estimate token entropy for confidence calibration.
-
-        Uses model logits when available; otherwise falls back to lexical entropy so
-        lightweight tests and offline deployments still get a computed signal.
-        """
+        """Compute next-token entropy from model logits; fallback to lexical entropy offline."""
         sample = text if text is not None else prompt
-        try:
-            self._ensure_loaded()
-            if self.model is not None and self.tokenizer is not None:
+        if getattr(self, "_active_backend", "transformers") != "llama_cpp":
+            try:
                 import torch
 
-                encoded = self.tokenizer(sample or prompt or " ", return_tensors="pt")
-                encoded = self._move_inputs_to_model_device(encoded)
-                with torch.no_grad():
-                    logits = self.model(**encoded).logits[:, -1, :]
-                    probs = torch.softmax(logits, dim=-1)
-                    entropy = -(probs * torch.log(probs.clamp_min(1e-12))).sum(dim=-1).mean()
-                    return float(entropy.detach().cpu().item())
-        except Exception:
-            pass
+                self._ensure_loaded()
+                inputs = self._tokenize(sample or " ")
+                with torch.inference_mode():
+                    outputs = self.model(**inputs)
+                logits = outputs.logits[0, -1, :]
+                probs = torch.softmax(logits.float(), dim=-1)
+                entropy = -(probs * (probs + 1e-9).log()).sum().item()
+                return float(entropy)
+            except Exception:
+                pass
         import math, re
 
-        tokens = re.findall(r"[A-Za-z0-9_]+", sample.lower())
+        tokens = re.findall(r"[A-Za-z0-9_]+", (sample or "").lower())
         if not tokens:
             return 1.0
         counts = {tok: tokens.count(tok) for tok in set(tokens)}
         total = float(len(tokens))
         return -sum((count / total) * math.log(count / total) for count in counts.values())
+
+    def _tokenize(self, prompt: str) -> dict[str, Any]:
+        if self.tokenizer is None:
+            raise RuntimeError("Tokenizer must be loaded before entropy computation")
+        encoded = self.tokenizer(prompt, return_tensors="pt")
+        return self._move_inputs_to_model_device(encoded)
 
     def confidence_from_entropy(self, prompt: str = "", agent_name: str = "default") -> float:
         entropy = self.get_token_entropy(prompt)
