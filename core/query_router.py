@@ -49,7 +49,7 @@ class QueryRouter:
         chroma_path = cfg["rag"]["chroma_path"]
         self.client = chromadb.PersistentClient(path=chroma_path)
         self.collection = self.client.get_or_create_collection("girivinity_knowledge")
-        self.threshold = 0.72
+        self.threshold = 1.0 / (1.0 + 0.3888888888888889)
 
     @classmethod
     def _get_embedder(cls):

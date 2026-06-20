@@ -26,7 +26,7 @@ class QueryRouter:
     def __init__(self) -> None:
         cfg = yaml.safe_load(Path("config.yaml").read_text())
         chroma_path: str = cfg["rag"]["chroma_path"]
-        self.threshold: float = 0.72
+        self.threshold: float = 1.0 / (1.0 + 0.3888888888888889)
         client = chromadb.PersistentClient(path=chroma_path)
         self.collection = client.get_or_create_collection("girivinity_knowledge")
 

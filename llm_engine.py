@@ -138,6 +138,47 @@ class LLMEngine:
         completion_ids = output_ids[:, input_length:]
         return self.tokenizer.decode(completion_ids[0], skip_special_tokens=True)
 
+
+    def get_token_entropy(self, prompt: str = "", text: str | None = None) -> float:
+        """Estimate token entropy for confidence calibration.
+
+        Uses model logits when available; otherwise falls back to lexical entropy so
+        lightweight tests and offline deployments still get a computed signal.
+        """
+        sample = text if text is not None else prompt
+        try:
+            self._ensure_loaded()
+            if self.model is not None and self.tokenizer is not None:
+                import torch
+
+                encoded = self.tokenizer(sample or prompt or " ", return_tensors="pt")
+                encoded = self._move_inputs_to_model_device(encoded)
+                with torch.no_grad():
+                    logits = self.model(**encoded).logits[:, -1, :]
+                    probs = torch.softmax(logits, dim=-1)
+                    entropy = -(probs * torch.log(probs.clamp_min(1e-12))).sum(dim=-1).mean()
+                    return float(entropy.detach().cpu().item())
+        except Exception:
+            pass
+        import math, re
+
+        tokens = re.findall(r"[A-Za-z0-9_]+", sample.lower())
+        if not tokens:
+            return 1.0
+        counts = {tok: tokens.count(tok) for tok in set(tokens)}
+        total = float(len(tokens))
+        return -sum((count / total) * math.log(count / total) for count in counts.values())
+
+    def confidence_from_entropy(self, prompt: str = "", agent_name: str = "default") -> float:
+        entropy = self.get_token_entropy(prompt)
+        raw = 1.0 / (1.0 + max(0.0, entropy))
+        try:
+            from app.cognition.calibration import CalibrationManager
+
+            return CalibrationManager.from_config().calibrate(raw, agent_name)
+        except Exception:
+            return round(min(1.0, max(0.0, raw)), 3)
+
     def _move_inputs_to_model_device(self, encoded: dict[str, Any]) -> dict[str, Any]:
         return {
             key: self._move_tensor_to_model_device(value) if hasattr(value, "to") else value

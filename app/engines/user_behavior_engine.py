@@ -134,3 +134,96 @@ class AdTargetingSystem:
         if profile.interaction_patterns.get("avg_dwell_seconds", 0) > 20:
             segments.append("high_engagement_users")
         return segments or ["broad_audience"]
+
+@dataclass(slots=True)
+class CognitiveProfile:
+    anonymized_user_id: str
+    learning_style: str
+    knowledge_graph: dict
+    interaction_rhythm: str
+    preferred_response_format: str
+    expertise: dict
+
+
+class CognitiveProfileBuilder:
+    def __init__(self, tracker: UserBehaviorTrackingSystem, theory_of_mind_engine=None) -> None:
+        self.tracker = tracker
+        self.theory_of_mind = theory_of_mind_engine
+
+    @classmethod
+    def from_config(cls, path: str = "config.yaml") -> "CognitiveProfileBuilder":
+        guard = PrivacyGuard(require_consent=False)
+        return cls(UserBehaviorTrackingSystem(guard))
+
+    def build(self, user_id: str) -> CognitiveProfile:
+        profile = self.tracker.build_user_profile(user_id)
+        events = self.tracker._events.get(user_id, [])
+        text = " ".join(ev.query for ev in events)
+        lower = text.lower()
+        learning_style = "visual" if any(w in lower for w in ["diagram", "show", "visual"]) else "example-driven" if "example" in lower or "code" in lower else "textual"
+        preferred = "code" if any(w in lower for w in ["python", "code", "function"]) else "bullet points" if any("?" in ev.query and len(ev.query) < 80 for ev in events) else "prose"
+        rhythm = "deep explorations" if profile.interaction_patterns.get("avg_dwell_seconds", 0) > 30 else "quick queries"
+        known = profile.interests
+        gaps = [topic for topic in ["security", "python", "architecture", "rag"] if topic not in known]
+        expertise = {}
+        if self.theory_of_mind and hasattr(self.theory_of_mind, "infer"):
+            try: expertise = self.theory_of_mind.infer(text).__dict__
+            except Exception: expertise = {}
+        return CognitiveProfile(profile.anonymized_user_id, learning_style, {"known_topics": known, "knowledge_gaps": gaps}, rhythm, preferred, expertise)
+
+
+class PersonalisationEngine:
+    def __init__(self, profile_builder: CognitiveProfileBuilder) -> None:
+        self.profile_builder = profile_builder
+
+    @classmethod
+    def from_config(cls, path: str = "config.yaml") -> "PersonalisationEngine":
+        return cls(CognitiveProfileBuilder.from_config(path))
+
+    def personalize_prompt(self, base_prompt: str, user_id: str) -> str:
+        p = self.profile_builder.build(user_id)
+        instructions = [f"User learning style: {p.learning_style}.", f"Preferred format: {p.preferred_response_format}.", f"Interaction rhythm: {p.interaction_rhythm}."]
+        if "python" in p.knowledge_graph.get("known_topics", []): instructions.append("Skip beginner Python explanations unless requested.")
+        if p.learning_style == "visual": instructions.append("Use compact ASCII diagrams where helpful.")
+        if "security" in p.knowledge_graph.get("known_topics", []): instructions.append("Pre-load cybersecurity context and be precise about risk.")
+        return base_prompt.rstrip() + "\n\nPersonalisation:\n" + "\n".join(f"- {i}" for i in instructions)
+
+    def apply_to_agent(self, agent, user_id: str):
+        if hasattr(agent, "system_prompt"):
+            agent.system_prompt = self.personalize_prompt(agent.system_prompt, user_id)
+        return agent
+
+
+class FeedbackHarvester:
+    def __init__(self, db_path: str = "data/user_feedback.sqlite3") -> None:
+        import sqlite3
+        self.db_path = db_path
+        Path = __import__('pathlib').Path
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(db_path) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY, interaction_id TEXT, user_id TEXT, rating INTEGER, correction TEXT, signal_type TEXT, dwell_seconds REAL, follow_up_confusion INTEGER, repeated_question INTEGER, created_at REAL)")
+            db.commit()
+
+    @classmethod
+    def from_config(cls, path: str = "config.yaml") -> "FeedbackHarvester":
+        return cls()
+
+    def collect_explicit(self, interaction_id: str, rating: int, correction: str | None = None, user_id: str | None = None) -> None:
+        self._insert(interaction_id, user_id, rating, correction, "explicit", 0.0, False, False)
+
+    def collect_implicit(self, interaction_id: str, user_id: str | None = None, dwell_seconds: float = 0.0, follow_up_question: str = "", previous_question: str = "") -> None:
+        confusion = bool(re.search(r"confused|don't understand|what do you mean|clarify", follow_up_question, re.I))
+        repeated = bool(previous_question and follow_up_question and self._similar(previous_question, follow_up_question) > (3 / 4))
+        rating = -1 if confusion or repeated else 1 if dwell_seconds > 20 else 0
+        self._insert(interaction_id, user_id, rating, None, "implicit", dwell_seconds, confusion, repeated)
+
+    def _insert(self, interaction_id, user_id, rating, correction, signal_type, dwell, confusion, repeated):
+        import sqlite3, time
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("INSERT INTO feedback(interaction_id,user_id,rating,correction,signal_type,dwell_seconds,follow_up_confusion,repeated_question,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (interaction_id, user_id, int(rating), correction, signal_type, float(dwell), int(confusion), int(repeated), time.time()))
+            db.commit()
+
+    @staticmethod
+    def _similar(a: str, b: str) -> float:
+        sa, sb = set(a.lower().split()), set(b.lower().split())
+        return len(sa & sb) / max(1, len(sa | sb))

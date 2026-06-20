@@ -3,10 +3,13 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+import asyncio
+import sqlite3
 from collections import deque
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Protocol
+from pathlib import Path
 from urllib.parse import urlparse
 
 
@@ -82,6 +85,104 @@ class CrawlerEngine:
         self.quality_scorer = quality_scorer or HeuristicLLMQualityScorer()
         self.seen_urls: set[str] = set()
         self.content_hashes: set[str] = set()
+        self.dedup_db = Path("data/crawler_seen.sqlite3")
+        self.known_security_domains = {"nvd.nist.gov", "cisa.gov", "bleepingcomputer.com", "krebsonsecurity.com", "sans.org"}
+        self.blocklist = {"malware.example", "phishing.example"}
+        self.crawler_interval_seconds = 3600
+        self._browser = None
+        self._init_dedup_db()
+
+
+    @classmethod
+    def from_config(cls, path: str = "config.yaml") -> "CrawlerEngine":
+        import yaml
+        cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8")) if Path(path).exists() else {}
+        crawler_cfg = (cfg or {}).get("crawler", {}) or {}
+        return cls([], min_trust_score=float(crawler_cfg.get("trust_threshold", 0.6)), max_pages=int(crawler_cfg.get("max_depth", 100)))
+
+    def _init_dedup_db(self) -> None:
+        self.dedup_db.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.dedup_db) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS seen (hash TEXT PRIMARY KEY, url TEXT, created_at REAL)")
+            db.commit()
+
+    async def _ensure_browser(self):
+        if self._browser is not None:
+            return self._browser
+        from playwright.async_api import async_playwright
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.launch()
+        return self._browser
+
+    async def _crawl_url_async(self, url: str) -> str:
+        try:
+            import trafilatura
+            fetched = trafilatura.fetch_url(url)
+            if fetched and fetched.strip():
+                return fetched
+        except Exception:
+            pass
+        browser = await self._ensure_browser()
+        page = await browser.new_page()
+        try:
+            await page.goto(url, wait_until="networkidle", timeout=20000)
+            return await page.content()
+        finally:
+            await page.close()
+
+    def crawl_url(self, url: str) -> dict | None:
+        html = asyncio.run(self._crawl_url_async(url))
+        if not html or self._deduplicate(url, html):
+            return None
+        result = self.process_page(PageData(url=url, html=html))
+        return None if result is None else result.__dict__
+
+    def trust_score(self, url: str, content: str) -> float:
+        parsed = urlparse(url); domain = parsed.netloc.lower()
+        score = 0.0
+        if parsed.scheme == "https": score += 0.2
+        if any(domain.endswith(d) for d in self.known_security_domains): score += 0.3
+        if len(content or "") > 500: score += 0.1
+        if not re.search(r"ignore\s+previous|<script|javascript:|prompt\s*injection", content or "", re.I): score += 0.2
+        if domain not in self.blocklist: score += 0.2
+        return round(min(1.0, score), 3)
+
+    def cybersecurity_crawl(self) -> list[dict]:
+        urls = [
+            "https://nvd.nist.gov/vuln",
+            "https://www.cisa.gov/news-events/cybersecurity-advisories",
+            "https://www.bleepingcomputer.com/",
+            "https://krebsonsecurity.com/",
+            "https://www.sans.org/blog/",
+        ]
+        results = []
+        for url in urls:
+            try:
+                item = self.crawl_url(url)
+                if item: results.append(item)
+            except Exception:
+                continue
+        return results
+
+    def crawl_batch(self) -> list[dict]:
+        results = []
+        if self.queue:
+            for _ in range(min(len(self.queue), self.max_pages)):
+                url = self.queue.popleft()
+                item = self.crawl_url(url)
+                if item: results.append(item)
+        else:
+            results.extend(self.cybersecurity_crawl())
+        return results
+
+    def _deduplicate(self, url: str, content: str) -> bool:
+        digest = hashlib.sha256((url + (content or "")[:500]).encode("utf-8")).hexdigest()
+        with sqlite3.connect(self.dedup_db) as db:
+            exists = db.execute("SELECT 1 FROM seen WHERE hash=?", (digest,)).fetchone()
+            if exists: return True
+            db.execute("INSERT INTO seen(hash,url,created_at) VALUES(?,?,?)", (digest, url, time.time()))
+            db.commit()
+        return False
 
     def domain_trust_score(self, url: str) -> float:
         domain = urlparse(url).netloc.lower()
@@ -137,7 +238,7 @@ class CrawlerEngine:
         return False
 
     def process_page(self, page: PageData) -> CrawlResult | None:
-        trust_score = self.domain_trust_score(page.url)
+        trust_score = max(self.domain_trust_score(page.url), self.trust_score(page.url, page.html))
         if trust_score < self.min_trust_score:
             return None
 
