@@ -50,7 +50,7 @@ def test_agent_forge_adapts_existing():
 def test_agent_registry_save_and_load():
     with tempfile.TemporaryDirectory() as tmp:
         from app.core.agent_forge import AgentForge
-        from app.core.agent_registry import AgentRegistry
+        from app.agents.agent_registry import AgentRegistry
 
         registry = AgentRegistry()
         registry.agents_dir = Path(tmp)
@@ -65,7 +65,7 @@ def test_agent_registry_save_and_load():
 def test_agent_registry_find_similar():
     with tempfile.TemporaryDirectory() as tmp:
         from app.core.agent_forge import AgentForge
-        from app.core.agent_registry import AgentRegistry
+        from app.agents.agent_registry import AgentRegistry
 
         registry = AgentRegistry()
         registry.agents_dir = Path(tmp)
@@ -88,7 +88,7 @@ def test_orchestrator_detects_agent_request():
 def test_agent_list():
     with tempfile.TemporaryDirectory() as tmp:
         from app.core.agent_forge import AgentForge
-        from app.core.agent_registry import AgentRegistry
+        from app.agents.agent_registry import AgentRegistry
 
         registry = AgentRegistry()
         registry.agents_dir = Path(tmp)

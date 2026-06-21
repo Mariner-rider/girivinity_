@@ -117,6 +117,6 @@ class AgentRunner:
         return learned
 
     def _get_registry(self):
-        from app.core.agent_registry import AgentRegistry
+        from app.agents.agent_registry import AgentRegistry
 
         return AgentRegistry()

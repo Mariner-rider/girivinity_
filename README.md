@@ -265,7 +265,7 @@ girivinity/
 ├── app/core/__init__.py
 ├── app/core/agent_forge.py
 ├── app/core/agent_orchestrator.py
-├── app/core/agent_registry.py
+├── app/agents/agent_registry.py
 ├── app/core/agent_runner.py
 ├── app/core/citation_engine.py
 ├── app/core/cognitive_engine.py
