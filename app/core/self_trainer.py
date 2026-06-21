@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import multiprocessing
-import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
 
 import yaml
+
+from app.core.db import get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -32,25 +33,26 @@ class SelfTrainer:
         self._init_db()
 
     def queue(self, query: str, chunks: list[dict]) -> None:
-        """Write chunks to SQLite queue. Fast — never blocks caller."""
+        """Write chunks to PostgreSQL queue. Fast — never blocks caller."""
         ts = datetime.utcnow().isoformat()
-        with sqlite3.connect(self.db_path) as conn:
-            conn.executemany(
-                "INSERT INTO training_queue "
-                "(query, chunk_text, url, score, timestamp, status) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                [
-                    (
-                        query,
-                        c.get("text", ""),
-                        c.get("url", ""),
-                        c.get("score", 0.0),
-                        ts,
-                        "pending",
-                    )
-                    for c in chunks
-                ],
-            )
+        with get_conn() as conn:
+            with conn.cursor() as db:
+                db.executemany(
+                    "INSERT INTO training_queue "
+                    "(query, chunk_text, url, score, timestamp, status) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    [
+                        (
+                            query,
+                            c.get("text", ""),
+                            c.get("url", ""),
+                            c.get("score", 0.0),
+                            ts,
+                            "pending",
+                        )
+                        for c in chunks
+                    ],
+                )
 
     @classmethod
     def start(cls) -> multiprocessing.Process:
@@ -72,17 +74,19 @@ class SelfTrainer:
             time.sleep(self.interval_s)
 
     def _check_and_train(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            count = conn.execute("SELECT COUNT(*) FROM training_queue WHERE status='pending'").fetchone()[0]
+        with get_conn() as conn:
+            with conn.cursor() as db:
+                db.execute("SELECT COUNT(*) FROM training_queue WHERE status='pending'")
+                count = db.fetchone()[0]
 
         if count < self.threshold:
             logger.info("SelfTrainer: %d pending < threshold %d, skipping", count, self.threshold)
             return
 
-        with sqlite3.connect(self.db_path) as conn:
-            rows = conn.execute(
-                "SELECT id, query, chunk_text, url " "FROM training_queue WHERE status='pending'"
-            ).fetchall()
+        with get_conn() as conn:
+            with conn.cursor() as db:
+                db.execute("SELECT id, query, chunk_text, url FROM training_queue WHERE status='pending'")
+                rows = db.fetchall()
 
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         self.training_dir.mkdir(parents=True, exist_ok=True)
@@ -105,11 +109,13 @@ class SelfTrainer:
 
         if success:
             ids = [r[0] for r in rows]
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
-                    f"UPDATE training_queue SET status='trained' " f"WHERE id IN ({','.join('?' * len(ids))})",
-                    ids,
-                )
+            placeholders = ",".join(["%s"] * len(ids))
+            with get_conn() as conn:
+                with conn.cursor() as db:
+                    db.execute(
+                        f"UPDATE training_queue SET status='trained' WHERE id IN ({placeholders})",
+                        ids,
+                    )
             self._log_event(ts, len(rows), "success")
 
     def _run_lora_update(self, dataset_path: Path, version: str) -> bool:
@@ -226,20 +232,21 @@ class SelfTrainer:
 
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
+        with get_conn() as conn:
+            with conn.cursor() as db:
+                db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS training_queue (
+                        id         SERIAL PRIMARY KEY,
+                        query      TEXT    NOT NULL,
+                        chunk_text TEXT    NOT NULL,
+                        url        TEXT    DEFAULT '',
+                        score      REAL    DEFAULT 0.0,
+                        timestamp  TEXT    NOT NULL,
+                        status     TEXT    DEFAULT 'pending'
+                    )
                 """
-                CREATE TABLE IF NOT EXISTS training_queue (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    query      TEXT    NOT NULL,
-                    chunk_text TEXT    NOT NULL,
-                    url        TEXT    DEFAULT '',
-                    score      REAL    DEFAULT 0.0,
-                    timestamp  TEXT    NOT NULL,
-                    status     TEXT    DEFAULT 'pending'
                 )
-            """
-            )
 
     def _log_event(self, ts: str, count: int, status: str) -> None:
         self.event_log.parent.mkdir(parents=True, exist_ok=True)
