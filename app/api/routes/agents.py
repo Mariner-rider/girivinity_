@@ -45,7 +45,7 @@ async def run_agent(req: AgentRequest):
 
 @router.get("/list")
 async def list_agents():
-    from app.core.agent_registry import AgentRegistry
+    from app.agents.agent_registry import AgentRegistry
 
     agents = AgentRegistry().list_agents()
     return {"agents": agents, "total": len(agents)}
@@ -53,7 +53,7 @@ async def list_agents():
 
 @router.get("/{agent_id}")
 async def get_agent(agent_id: str):
-    from app.core.agent_registry import AgentRegistry
+    from app.agents.agent_registry import AgentRegistry
 
     agent = AgentRegistry().load(agent_id)
     if not agent:
@@ -63,7 +63,7 @@ async def get_agent(agent_id: str):
 
 @router.delete("/{agent_id}")
 async def delete_agent(agent_id: str):
-    from app.core.agent_registry import AgentRegistry
+    from app.agents.agent_registry import AgentRegistry
 
     ok = AgentRegistry().delete(agent_id)
     if not ok:
@@ -73,7 +73,7 @@ async def delete_agent(agent_id: str):
 
 @router.post("/{agent_id}/run")
 async def run_existing_agent(agent_id: str, req: AgentRequest):
-    from app.core.agent_registry import AgentRegistry
+    from app.agents.agent_registry import AgentRegistry
     from app.core.agent_runner import AgentRunner
 
     agent = AgentRegistry().load(agent_id)

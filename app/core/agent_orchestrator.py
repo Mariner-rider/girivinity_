@@ -43,7 +43,7 @@ class AgentOrchestrator:
 
     def orchestrate(self, request: str, user_id: str = "anonymous") -> OrchestrationResult:
         from app.core.agent_forge import AgentForge
-        from app.core.agent_registry import AgentRegistry
+        from app.agents.agent_registry import AgentRegistry
         from app.core.agent_runner import AgentRunner
 
         forge = AgentForge()

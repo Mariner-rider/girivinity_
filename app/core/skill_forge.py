@@ -2,7 +2,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import sqlite3
 import threading
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -10,6 +9,8 @@ from pathlib import Path
 
 import chromadb
 import yaml
+
+from app.core.db import get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -134,12 +135,13 @@ class SkillForge:
 
     def update_skill_feedback(self, skill_slug: str, user_score: float) -> None:
         """Called after user rates a response. Updates skill quality."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "INSERT INTO skill_feedback (slug, score, timestamp) "
-                "VALUES (?, ?, ?)",
-                (skill_slug, user_score, datetime.now(timezone.utc).isoformat()),
-            )
+        with get_conn() as conn:
+            with conn.cursor() as db:
+                db.execute(
+                    "INSERT INTO skill_feedback (slug, score, timestamp) "
+                    "VALUES (%s, %s, %s)",
+                    (skill_slug, user_score, datetime.now(timezone.utc).isoformat()),
+                )
         threading.Thread(
             target=self._maybe_improve_skill,
             args=(skill_slug,),
@@ -147,12 +149,14 @@ class SkillForge:
         ).start()
 
     def evaluate_skill(self, skill: Skill) -> SkillEvalResult:
-        with sqlite3.connect(self.db_path) as conn:
-            rows = conn.execute(
-                "SELECT query, response, feedback_score FROM skill_interactions "
-                "WHERE skill_slug = ? ORDER BY timestamp DESC LIMIT 20",
-                (skill.slug,),
-            ).fetchall()
+        with get_conn() as conn:
+            with conn.cursor() as db:
+                db.execute(
+                    "SELECT query, response, feedback_score FROM skill_interactions "
+                    "WHERE skill_slug = %s ORDER BY timestamp DESC LIMIT 20",
+                    (skill.slug,),
+                )
+                rows = db.fetchall()
 
         if not rows:
             return SkillEvalResult(
@@ -184,11 +188,13 @@ class SkillForge:
         )
 
     def list_skills(self) -> list[dict]:
-        with sqlite3.connect(self.db_path) as conn:
-            rows = conn.execute(
-                "SELECT slug, topic, version, confidence, usage_count, "
-                "avg_feedback, updated_at FROM skills ORDER BY usage_count DESC"
-            ).fetchall()
+        with get_conn() as conn:
+            with conn.cursor() as db:
+                db.execute(
+                    "SELECT slug, topic, version, confidence, usage_count, "
+                    "avg_feedback, updated_at FROM skills ORDER BY usage_count DESC"
+                )
+                rows = db.fetchall()
         return [
             {
                 "slug": r[0],
@@ -209,19 +215,20 @@ class SkillForge:
         response: str,
         feedback: float | None = None,
     ) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "INSERT INTO skill_interactions "
-                "(skill_slug, query, response, feedback_score, timestamp) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (
-                    skill_slug,
-                    query,
-                    response[:2000],
-                    feedback,
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
+        with get_conn() as conn:
+            with conn.cursor() as db:
+                db.execute(
+                    "INSERT INTO skill_interactions "
+                    "(skill_slug, query, response, feedback_score, timestamp) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (
+                        skill_slug,
+                        query,
+                        response[:2000],
+                        feedback,
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
 
     def _generate(self, topic: str, chunks: list[dict], urls: list[str]) -> None:
         slug = self._slugify(topic)
@@ -435,13 +442,15 @@ class SkillForge:
 
     def _maybe_improve_skill(self, slug: str) -> None:
         """Re-distil skill if recent feedback is below threshold."""
-        with sqlite3.connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT AVG(score) FROM "
-                "(SELECT score FROM skill_feedback WHERE slug = ? "
-                " ORDER BY id DESC LIMIT 10)",
-                (slug,),
-            ).fetchone()
+        with get_conn() as conn:
+            with conn.cursor() as db:
+                db.execute(
+                    "SELECT AVG(score) FROM "
+                    "(SELECT score FROM skill_feedback WHERE slug = %s "
+                    " ORDER BY id DESC LIMIT 10) recent_feedback",
+                    (slug,),
+                )
+                row = db.fetchone()
 
         if not row or row[0] is None:
             return
@@ -465,30 +474,31 @@ class SkillForge:
         skill_path.mkdir(parents=True, exist_ok=True)
         (skill_path / "skill.json").write_text(json.dumps(asdict(skill), indent=2), encoding="utf-8")
         (skill_path / "SKILL.md").write_text(skill.to_prompt_block(), encoding="utf-8")
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO skills
-                  (slug, topic, version, confidence, usage_count,
-                   avg_feedback, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(slug) DO UPDATE SET
-                  version=excluded.version,
-                  confidence=excluded.confidence,
-                  usage_count=excluded.usage_count,
-                  avg_feedback=excluded.avg_feedback,
-                  updated_at=excluded.updated_at
-            """,
-                (
-                    skill.slug,
-                    skill.topic,
-                    skill.version,
-                    skill.confidence,
-                    skill.usage_count,
-                    skill.avg_feedback,
-                    skill.updated_at,
-                ),
-            )
+        with get_conn() as conn:
+            with conn.cursor() as db:
+                db.execute(
+                    """
+                    INSERT INTO skills
+                      (slug, topic, version, confidence, usage_count,
+                       avg_feedback, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(slug) DO UPDATE SET
+                      version=excluded.version,
+                      confidence=excluded.confidence,
+                      usage_count=excluded.usage_count,
+                      avg_feedback=excluded.avg_feedback,
+                      updated_at=excluded.updated_at
+                """,
+                    (
+                        skill.slug,
+                        skill.topic,
+                        skill.version,
+                        skill.confidence,
+                        skill.usage_count,
+                        skill.avg_feedback,
+                        skill.updated_at,
+                    ),
+                )
 
     def _load_skill(self, slug: str) -> Skill | None:
         skill_path = self.skills_dir / slug / "skill.json"
@@ -525,34 +535,43 @@ class SkillForge:
             logger.warning("Skill index upsert failed: %s", exc)
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.executescript(
+        with get_conn() as conn:
+            with conn.cursor() as db:
+                db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS skills (
+                        slug        TEXT PRIMARY KEY,
+                        topic       TEXT NOT NULL,
+                        version     INTEGER DEFAULT 1,
+                        confidence  REAL DEFAULT 0.5,
+                        usage_count INTEGER DEFAULT 0,
+                        avg_feedback REAL DEFAULT 0.0,
+                        updated_at  TEXT NOT NULL
+                    )
                 """
-                CREATE TABLE IF NOT EXISTS skills (
-                    slug        TEXT PRIMARY KEY,
-                    topic       TEXT NOT NULL,
-                    version     INTEGER DEFAULT 1,
-                    confidence  REAL DEFAULT 0.5,
-                    usage_count INTEGER DEFAULT 0,
-                    avg_feedback REAL DEFAULT 0.0,
-                    updated_at  TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS skill_feedback (
-                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                    slug      TEXT NOT NULL,
-                    score     REAL NOT NULL,
-                    timestamp TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS skill_interactions (
-                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                    skill_slug     TEXT NOT NULL,
-                    query          TEXT NOT NULL,
-                    response       TEXT NOT NULL,
-                    feedback_score REAL,
-                    timestamp      TEXT NOT NULL
-                );
-            """
-            )
+                )
+                db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS skill_feedback (
+                        id        SERIAL PRIMARY KEY,
+                        slug      TEXT NOT NULL,
+                        score     REAL NOT NULL,
+                        timestamp TEXT NOT NULL
+                    )
+                """
+                )
+                db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS skill_interactions (
+                        id             SERIAL PRIMARY KEY,
+                        skill_slug     TEXT NOT NULL,
+                        query          TEXT NOT NULL,
+                        response       TEXT NOT NULL,
+                        feedback_score REAL,
+                        timestamp      TEXT NOT NULL
+                    )
+                """
+                )
 
     def _slugify(self, text: str) -> str:
         text = text.lower().strip()
