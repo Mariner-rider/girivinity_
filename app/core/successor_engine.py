@@ -2,13 +2,13 @@ from __future__ import annotations
 import json
 import logging
 import multiprocessing
-import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 
+from app.core.db import get_conn
 from app.core.model_generation_policy import GenerationPolicy
 
 logger = logging.getLogger(__name__)
@@ -67,17 +67,18 @@ class SuccessorEngine:
 
     def log_feedback(self, user_id: str, score: float) -> None:
         """Called from chat endpoint when user rates a response (1-5)."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS feedback "
-                "(id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                "user_id TEXT, score REAL, timestamp TEXT)"
-            )
-            conn.execute(
-                "INSERT INTO feedback (user_id, score, timestamp) "
-                "VALUES (?, ?, ?)",
-                (user_id, score, datetime.utcnow().isoformat()),
-            )
+        with get_conn() as conn:
+            with conn.cursor() as db:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS feedback "
+                    "(id SERIAL PRIMARY KEY, "
+                    "user_id TEXT, score REAL, timestamp TEXT)"
+                )
+                db.execute(
+                    "INSERT INTO feedback (user_id, score, timestamp) "
+                    "VALUES (%s, %s, %s)",
+                    (user_id, score, datetime.utcnow().isoformat()),
+                )
 
     def get_notifications(self) -> list[dict]:
         if not self.notifications_path.exists():
@@ -200,14 +201,14 @@ class SuccessorEngine:
         corpus_dir = self.corpus_dir / version
         corpus_dir.mkdir(parents=True, exist_ok=True)
         corpus_path = corpus_dir / "corpus.jsonl"
-        with sqlite3.connect(self.db_path) as conn:
-            try:
-                rows = conn.execute(
-                    "SELECT query, chunk_text FROM training_queue " "WHERE status='trained'"
-                ).fetchall()
-            except sqlite3.OperationalError:
-                logger.warning("training_queue table not found")
-                return None
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as db:
+                    db.execute("SELECT query, chunk_text FROM training_queue WHERE status='trained'")
+                    rows = db.fetchall()
+        except Exception:
+            logger.warning("training_queue table not found")
+            return None
         if not rows:
             logger.warning("No trained chunks to export")
             return None
@@ -297,21 +298,23 @@ class SuccessorEngine:
 
     def _count_trained_chunks(self) -> int:
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                return conn.execute(
-                    "SELECT COUNT(*) FROM training_queue WHERE status='trained'"
-                ).fetchone()[0]
+            with get_conn() as conn:
+                with conn.cursor() as db:
+                    db.execute("SELECT COUNT(*) FROM training_queue WHERE status='trained'")
+                    return db.fetchone()[0]
         except Exception:
             return 0
 
     def _rolling_quality_score(self) -> float:
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                row = conn.execute(
-                    "SELECT AVG(score) FROM "
-                    "(SELECT score FROM feedback "
-                    " ORDER BY id DESC LIMIT 100)"
-                ).fetchone()
+            with get_conn() as conn:
+                with conn.cursor() as db:
+                    db.execute(
+                        "SELECT AVG(score) FROM "
+                        "(SELECT score FROM feedback "
+                        " ORDER BY id DESC LIMIT 100) recent_feedback"
+                    )
+                    row = db.fetchone()
             return float(row[0]) if row and row[0] is not None else 0.0
         except Exception:
             return 0.0
