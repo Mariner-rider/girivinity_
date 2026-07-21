@@ -19,7 +19,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Dataset, random_split
 
-from app.llm.girivinity_architecture import GirivinityConfig, GirivinityModel
+from model.architecture import GirivinityConfig, GirivinityModel
 from app.llm.girivinity_tokenizer import GirivinityTokenizer
 
 logger = logging.getLogger(__name__)
@@ -430,18 +430,26 @@ def _model_config_from_root(raw: dict[str, Any]) -> dict[str, Any]:
         return architecture
     key_map = {
         "vocab_size": "vocab_size",
-        "hidden_dim": "hidden_dim",
-        "dim": "hidden_dim",
-        "num_heads": "num_heads",
-        "n_heads": "num_heads",
-        "num_layers": "num_layers",
-        "n_layers": "num_layers",
-        "ffn_dim": "ffn_dim",
+        "hidden_dim": "dim",
+        "dim": "dim",
+        "num_heads": "n_heads",
+        "n_heads": "n_heads",
+        "num_layers": "n_layers",
+        "n_layers": "n_layers",
         "max_seq_len": "max_seq_len",
-        "num_kv_heads": "num_kv_heads",
-        "n_kv_heads": "num_kv_heads",
+        "num_kv_heads": "n_kv_heads",
+        "n_kv_heads": "n_kv_heads",
+        "norm_eps": "norm_eps",
+        "rope_theta": "rope_theta",
     }
-    return {target: model[source] for source, target in key_map.items() if source in model}
+    result = {target: model[source] for source, target in key_map.items() if source in model}
+    # model/architecture.py's GirivinityConfig has no direct ffn_dim field —
+    # it derives ffn_dim from ffn_multiplier. Convert if a raw ffn_dim was given.
+    if "ffn_dim" in model and "dim" in result:
+        result["ffn_multiplier"] = model["ffn_dim"] / result["dim"]
+    elif "ffn_dim" in model:
+        result["ffn_multiplier"] = model["ffn_dim"] / model.get("hidden_dim", model.get("dim", 3072))
+    return result
 
 
 def _dataclass_to_dict(value: Any) -> Any:
