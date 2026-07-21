@@ -243,7 +243,7 @@ class GirivinityLoader:
         if not self.native_model_path:
             raise ValueError("model.native_model_path is required when use_native_model is true")
 
-        from app.llm.girivinity_architecture import GirivinityModel
+        from model.architecture import GirivinityModel
 
         logger.info("Loading native GirivinityModel from %s", self.native_model_path)
         model = GirivinityModel.load_pretrained(self.native_model_path)

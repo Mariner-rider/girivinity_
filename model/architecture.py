@@ -167,6 +167,7 @@ class GirivinityModel(nn.Module):
         self.norm    = RMSNorm(cfg.dim, cfg.norm_eps)
         self.lm_head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight  # weight tying
+        self.gradient_checkpointing = False
 
         cos, sin = build_rope_cache(
             cfg.max_seq_len, cfg.head_dim, cfg.rope_theta, torch.device("cpu")
@@ -198,13 +199,96 @@ class GirivinityModel(nn.Module):
         ).triu(1).unsqueeze(0).unsqueeze(0)
 
         new_caches = []
+        use_gradient_checkpointing = (
+            self.gradient_checkpointing and self.training and kv_caches is None
+        )
         for i, layer in enumerate(self.layers):
             cache = kv_caches[i] if kv_caches else None
+            if use_gradient_checkpointing:
+                from torch.utils.checkpoint import checkpoint
+
+                def custom_forward(
+                    hidden_states: torch.Tensor,
+                    checkpointed_layer: DecoderBlock = layer,
+                ) -> torch.Tensor:
+                    return checkpointed_layer(hidden_states, cos, sin, causal_mask, None)[0]
+
+                x = checkpoint(custom_forward, x, use_reentrant=False)
+                continue
             x, new_cache = layer(x, cos, sin, causal_mask, cache)
             new_caches.append(new_cache)
 
         logits = self.lm_head(self.norm(x))
         return logits, new_caches
+
+    def gradient_checkpointing_enable(self) -> None:
+        self.gradient_checkpointing = True
+
+    def gradient_checkpointing_disable(self) -> None:
+        self.gradient_checkpointing = False
+
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: int = 256,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+    ) -> torch.Tensor:
+        self.eval()
+        generated = input_ids
+        kv_caches = None
+        next_input = input_ids
+        for _ in range(max_new_tokens):
+            logits, kv_caches = self(next_input, kv_caches=kv_caches)
+            next_token_logits = logits[:, -1, :]
+            if temperature <= 0:
+                next_token = next_token_logits.argmax(dim=-1, keepdim=True)
+            else:
+                probs = F.softmax(next_token_logits / temperature, dim=-1)
+                next_token = self._sample_top_p(probs, top_p)
+            generated = torch.cat((generated, next_token), dim=1)
+            next_input = next_token
+        return generated
+
+    def count_parameters(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def save_pretrained(self, path: str) -> None:
+        from pathlib import Path
+        import json
+        from dataclasses import asdict
+
+        output_dir = Path(path)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "config.json").write_text(json.dumps(asdict(self.cfg), indent=2))
+        torch.save(self.state_dict(), output_dir / "pytorch_model.bin")
+
+    @classmethod
+    def load_pretrained(cls, path: str) -> "GirivinityModel":
+        from pathlib import Path
+        import json
+
+        model_dir = Path(path)
+        cfg = GirivinityConfig(**json.loads((model_dir / "config.json").read_text()))
+        model = cls(cfg)
+        state_dict = torch.load(model_dir / "pytorch_model.bin", map_location="cpu")
+        model.load_state_dict(state_dict)
+        return model
+
+    @staticmethod
+    def _sample_top_p(probs: torch.Tensor, top_p: float) -> torch.Tensor:
+        if top_p >= 1.0:
+            return torch.multinomial(probs, num_samples=1)
+        sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+        cumulative = torch.cumsum(sorted_probs, dim=-1)
+        remove = cumulative > top_p
+        remove[..., 1:] = remove[..., :-1].clone()
+        remove[..., 0] = False
+        sorted_probs = sorted_probs.masked_fill(remove, 0.0)
+        sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        sampled = torch.multinomial(sorted_probs, num_samples=1)
+        return sorted_indices.gather(-1, sampled)
 
     def param_count(self) -> str:
         n = sum(p.numel() for p in self.parameters())
