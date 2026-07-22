@@ -1,5 +1,33 @@
 # Girivinity — Self-Learning AI System
 
+## Why We Built This
+
+Girivinity was born in India with a single belief: the future of artificial
+intelligence should not be owned by a handful of companies in Silicon Valley.
+Every major AI model today — GPT, Claude, Gemini, Llama — was built abroad,
+trained on data that underrepresents Indian languages, Indian culture, and
+Indian knowledge. When you ask these models about local governance, regional
+history, or technical questions in Hindi, the answers are shallow. The models
+were not built for us.
+
+We decided to change that.
+
+Girivinity is our answer — a fully independent AI system, built from scratch
+in Python and PyTorch, that:
+
+- Owns its own transformer architecture (no AutoModelForCausalLM)
+- Trains its own tokeniser natively on Hindi, English, and code
+- Learns continuously from the web without human intervention
+- Runs on minimal hardware so it can be deployed anywhere in India
+- Never fabricates sources — every claim is verified before it reaches the user
+
+This is not a product built for profit. It is infrastructure built for
+independence. We are building the model that belongs to everyone.
+
+Built with pride in India. Open for the world.
+
+---
+
 Girivinity is a self-improving, self-learning AI system built from scratch.
 It retrieves live information from the web, synthesises answers using its
 own language model, verifies every claim before responding, and continuously
@@ -15,17 +43,20 @@ within this codebase.
 
 ## Table of Contents
 
-1. [What Makes This Different](#what-makes-this-different)
-2. [System Architecture](#system-architecture)
-3. [How Self-Learning Works](#how-self-learning-works)
-4. [How Successor Models Work](#how-successor-models-work)
-5. [Repository Structure](#repository-structure)
-6. [Component Reference](#component-reference)
-7. [API Reference](#api-reference)
-8. [Deployment Guide — Step by Step](#deployment-guide)
-9. [Development Guide](#development-guide)
-10. [Configuration Reference](#configuration-reference)
-11. [Roadmap](#roadmap)
+1. [Why We Built This](#why-we-built-this)
+2. [What Makes This Different](#what-makes-this-different)
+3. [System Architecture](#system-architecture)
+4. [How Self-Learning Works](#how-self-learning-works)
+5. [How Successor Models Work](#how-successor-models-work)
+6. [Model Generation Roadmap](#model-generation-roadmap)
+7. [Repository Structure](#repository-structure)
+8. [Component Reference](#component-reference)
+9. [API Reference](#api-reference)
+10. [Deployment Guide — Step by Step](#deployment-guide)
+11. [Development Guide](#development-guide)
+12. [Configuration Reference](#configuration-reference)
+13. [Serving the API to Others](#serving-the-api-to-others)
+14. [Roadmap](#roadmap)
 
 ---
 
@@ -36,7 +67,7 @@ the response. Girivinity is not that.
 
 **It owns its own model.** The GirivinityModel is a decoder-only transformer
 built from scratch in PyTorch — RMSNorm, Rotary Position Embeddings, Grouped
-Query Attention, SwiGLU feed-forward, weight-tied LM head. ~360M parameters.
+Query Attention, SwiGLU feed-forward, weight-tied LM head. The model family starts at 3B parameters (Girivinity-3B), scaling to 70B and beyond through the structured generation roadmap.
 Quantised to Q4_K_M GGUF for CPU inference on a standard VPS.
 
 **It learns while it runs.** Every query that misses the knowledge base
@@ -55,7 +86,7 @@ and attached web sources. Unverified claims are flagged. Confidence is
 scored 0.0–1.0. Citations only appear for URLs that actually exist in
 the current session's retrieved data.
 
-**It runs on low compute.** Inference runs CPU-only on a 4GB VPS.
+**It runs on low compute.** Runs on both GPU and CPU — automatically. When a GPU is present, inference uses 4-bit NF4 quantization (BitsAndBytes) for maximum speed at minimum VRAM cost. When no GPU is available, it falls back to CPU float32 inference on as little as 4GB RAM. Same codebase, same config, zero changes needed.
 LoRA fine-tuning triggers on demand on the cheapest GPU instance available
 (Lambda Labs T4, ~$0.35/hour). Full successor retraining runs once every
 few months automatically.
@@ -170,6 +201,7 @@ When either triggers:
 3. Perplexity evaluated on held-out sample
 4. If new model perplexity is lower (better) than current:
    - Saved to `models/versions/{timestamp}/`
+   - Automatically quantized to Q4_K_M GGUF at `models/versions/{timestamp}/model.gguf` for CPU inference
    - Notification written to `logs/admin_notifications.jsonl`
    - Status: `awaiting_admin_approval`
 5. Admin calls `POST /admin/approve-successor/{version}`
@@ -183,84 +215,234 @@ The improvement percentage is included in the notification.
 
 ---
 
-## Repository Structure
-girivinity/
-│
-├── app/                          # FastAPI application
-│   ├── main.py                   # App entry point, startup wiring
-│   ├── core/                     # Intelligence layer
-│   │   ├── query_router.py       # Routes queries: KB or web
-│   │   ├── web_intelligence.py   # Live web search + chunking
-│   │   ├── self_trainer.py       # Continuous LoRA training daemon
-│   │   ├── llm_synthesiser.py    # Context → answer via LLM
-│   │   ├── truth_engine.py       # Claim verification + citations
-│   │   ├── successor_engine.py   # Successor model creation daemon
-│   │   ├── config_loader.py      # YAML config helpers
-│   │   └── config_schema.py      # Config validation
-│   └── api/
-│       └── routes/
-│           ├── chat.py           # POST /chat/message
-│           ├── admin.py          # Admin successor management
-│           └── health.py         # GET /health, /health/deep
-│
-├── model/                        # Custom transformer model
-│   ├── architecture.py           # GirivinityModel (PyTorch from scratch)
-│   ├── tokeniser.py              # BPE tokeniser trainer
-│   ├── train.py                  # Full training script
-│   └── quantise.py               # GGUF export for CPU inference
-│
-├── agent_controller.py           # Multi-agent orchestration
-├── knowledge_distillation_engine.py
-├── user_behavior_engine.py
-├── analytics_engine.py
-├── llm_loader.py                 # GGUF model loader (llama-cpp-python)
-├── llm_engine.py                 # GirivinityEngine inference wrapper
-├── language_router.py
-├── context_optimization_engine.py
-├── instruction_following_engine.py
-├── multimodal_engine.py
-├── response_planning_engine.py
-├── tool_selection_engine.py
-├── inter_model_protocol.py
-│
-├── tests/                        # Pytest test suite
-│   ├── test_query_router.py
-│   ├── test_web_intelligence.py
-│   ├── test_self_trainer.py
-│   ├── test_chat_endpoint.py
-│   ├── test_llm_synthesiser.py
-│   ├── test_truth_engine.py
-│   ├── test_successor_engine.py
-│   ├── test_architecture.py
-│   └── test_train.py
-│
-├── data/                         # Runtime data (git-ignored)
-│   ├── chroma/                   # ChromaDB vector store
-│   ├── training_queue/           # JSONL training batches
-│   └── seed_corpus.txt           # Bootstrap text
-│
-├── models/                       # Model files (git-ignored)
-│   ├── tokeniser/                # Saved BPE tokeniser
-│   ├── base/                     # Trained base model weights
-│   ├── adapters/                 # LoRA adapters
-│   │   └── latest -> {version}/  # Symlink to current adapter
-│   ├── girivinity_quantised/     # GGUF model for inference
-│   │   └── model.gguf
-│   ├── versions/                 # Successor model versions
-│   └── active -> {version}/      # Symlink to active model
-│
-├── logs/                         # Runtime logs (git-ignored)
-│   ├── self_training.jsonl
-│   ├── alerts.jsonl
-│   └── admin_notifications.jsonl
-│
-├── config.yaml                   # All system configuration
-├── requirements.txt
-├── Makefile
-└── docs/
-└── DEPLOYMENT.md
+
+## Model Generation Roadmap
+
+| Generation | Model | Target Parameters | Architecture Direction |
+|---|---|---:|---|
+| 1 | Girivinity-3B | 3B | First production-scale native Girivinity generation |
+| 2 | Girivinity-7B | 7B | Larger general-purpose model with stronger reasoning |
+| 3 | Girivinity-13B | 13B | Higher-capacity reasoning and multilingual depth |
+| 4 | Girivinity-34B | 34B | Large-scale expert generation for complex domains |
+| 5 | Girivinity-70B | 70B | Last explicitly defined, hand-tuned generation |
+
+### The Roadmap Never Ends
+
+Generations 1–5 are explicitly defined with hand-tuned architectures.
+Beyond Generation 5 (Girivinity-70B), the system automatically extrapolates
+the next generation by doubling parameters and scaling the architecture proportionally.
+
+There is no ceiling. Girivinity is designed to keep growing as long as
+data and compute are available. Each generation is twice as capable as the last.
+
+The question is never "when do we stop?" — it is always "what does the next generation need?"
 
 ---
+
+## Repository Structure
+
+The Python source tree below is generated from `find . -type f -name "*.py" | sort` after the root-level engine cleanup.
+
+```text
+girivinity/
+├── agent_controller.py
+├── app/__init__.py
+├── app/agents/__init__.py
+├── app/agents/controller.py
+├── app/agents/self_critic.py
+├── app/analytics/__init__.py
+├── app/analytics/events.py
+├── app/api/__init__.py
+├── app/api/routes/admin.py
+├── app/api/routes/agents.py
+├── app/api/routes/chat.py
+├── app/api/routes/cuda.py
+├── app/api/routes/health.py
+├── app/api/routes/rasp.py
+├── app/api/routes/security.py
+├── app/api/routes/skills.py
+├── app/api/routes/tenant_security.py
+├── app/core/__init__.py
+├── app/core/agent_forge.py
+├── app/core/agent_orchestrator.py
+├── app/core/agent_registry.py
+├── app/core/agent_runner.py
+├── app/core/citation_engine.py
+├── app/core/cognitive_engine.py
+├── app/core/config.py
+├── app/core/config_loader.py
+├── app/core/config_schema.py
+├── app/core/cuda_crawler.py
+├── app/core/cuda_engine.py
+├── app/core/db.py
+├── app/core/domain_router.py
+├── app/core/llm_synthesiser.py
+├── app/core/memory_engine.py
+├── app/core/migrations.py
+├── app/core/query_router.py
+├── app/core/self_trainer.py
+├── app/core/sentiment_engine.py
+├── app/core/skill_forge.py
+├── app/core/social_engine.py
+├── app/core/successor_engine.py
+├── app/core/system_config.py
+├── app/core/teaching_engine.py
+├── app/core/truth_engine.py
+├── app/core/web_intelligence.py
+├── app/crawler/__init__.py
+├── app/crawler/items.py
+├── app/crawler/pipeline.py
+├── app/crawler/pipelines.py
+├── app/crawler/queue.py
+├── app/crawler/runner.py
+├── app/crawler/settings.py
+├── app/crawler/spiders/__init__.py
+├── app/crawler/spiders/scalable_spider.py
+├── app/crawler/vector_db.py
+├── app/engines/__init__.py
+├── app/engines/analytics_engine.py
+├── app/engines/code_intelligence_engine.py
+├── app/engines/context_optimization_engine.py
+├── app/engines/instruction_following_engine.py
+├── app/engines/inter_model_protocol.py
+├── app/engines/language_router.py
+├── app/engines/response_planning_engine.py
+├── app/engines/tool_selection_engine.py
+├── app/engines/user_behavior_engine.py
+├── app/finetune/__init__.py
+├── app/finetune/continual_learning.py
+├── app/finetune/dataset_builder.py
+├── app/finetune/evaluate.py
+├── app/finetune/lora_trainer.py
+├── app/finetune/update_gate.py
+├── app/llm/__init__.py
+├── app/llm/girivinity_architecture.py
+├── app/llm/girivinity_tokenizer.py
+├── app/llm/loader.py
+├── app/main.py
+├── app/memory/__init__.py
+├── app/memory/system.py
+├── app/monitoring/__init__.py
+├── app/monitoring/logging.py
+├── app/monitoring/metrics.py
+├── app/multimodal/__init__.py
+├── app/multimodal/processor.py
+├── app/profiling/__init__.py
+├── app/profiling/user_profiler.py
+├── app/rag/__init__.py
+├── app/rag/system.py
+├── app/rag/truth_verifier.py
+├── app/reasoning_planner.py
+├── app/security/__init__.py
+├── app/security/ai_threat_reasoner.py
+├── app/security/alignment.py
+├── app/security/anomaly_scorer.py
+├── app/security/cyber_shield.py
+├── app/security/emergency_shutdown.py
+├── app/security/jailbreak_classifier.py
+├── app/security/layer.py
+├── app/security/model_steal_detector.py
+├── app/security/policy.py
+├── app/security/policy_engine.py
+├── app/security/rasp/__init__.py
+├── app/security/rasp/hardware_monitor.py
+├── app/security/rasp/process_guard.py
+├── app/security/rasp/rasp_engine.py
+├── app/security/rasp/runtime_interceptor.py
+├── app/security/rasp/self_healer.py
+├── app/security/rate_limiter.py
+├── app/security/session_manager.py
+├── app/security/tenant_security.py
+├── app/security/threat_detector.py
+├── app/security/training_poison_guard.py
+├── app/training/__init__.py
+├── app/training/benchmarking.py
+├── app/training/model_evolution.py
+├── app/training/pretrain.py
+├── config_loader.py
+├── core/__init__.py
+├── core/query_router.py
+├── core/self_trainer.py
+├── core/successor_engine.py
+├── core/truth_engine.py
+├── core/web_intelligence.py
+├── crawler_engine/__init__.py
+├── crawler_engine/engine.py
+├── knowledge_distillation_engine.py
+├── llm_engine.py
+├── llm_loader.py
+├── model/                       # Legacy compatibility/export utilities; native LLM code lives in app/llm/
+├── multimodal_engine.py
+├── tests/test_agent_controller.py
+├── tests/test_agent_mode.py
+├── tests/test_ai_threat_reasoner.py
+├── tests/test_alignment_layer.py
+├── tests/test_analytics_engine.py
+├── tests/test_architecture.py
+├── tests/test_architecture_3b.py
+├── tests/test_architecture_v2.py
+├── tests/test_base_model.py
+├── tests/test_benchmarking_system.py
+├── tests/test_chat_endpoint.py
+├── tests/test_citation_engine.py
+├── tests/test_code_intelligence_engine.py
+├── tests/test_cognitive_engine.py
+├── tests/test_config.py
+├── tests/test_config_loader.py
+├── tests/test_context_optimization_engine.py
+├── tests/test_continual_learning.py
+├── tests/test_crawler_engine.py
+├── tests/test_crawler_pipeline_integration.py
+├── tests/test_crawler_queue.py
+├── tests/test_cuda_engine.py
+├── tests/test_dataset_builder.py
+├── tests/test_db.py
+├── tests/test_domain_router.py
+├── tests/test_emergency_shutdown.py
+├── tests/test_girivinity_model.py
+├── tests/test_instruction_following_engine.py
+├── tests/test_inter_model_protocol.py
+├── tests/test_knowledge_distillation_engine.py
+├── tests/test_language_router.py
+├── tests/test_llm_engine.py
+├── tests/test_llm_synthesiser.py
+├── tests/test_memory_engine.py
+├── tests/test_memory_system.py
+├── tests/test_model_evolution.py
+├── tests/test_model_inference.py
+├── tests/test_multimodal_engine.py
+├── tests/test_policy_engine.py
+├── tests/test_project_structure.py
+├── tests/test_query_router.py
+├── tests/test_rag_system.py
+├── tests/test_rasp.py
+├── tests/test_reasoning_planner.py
+├── tests/test_response_planning_engine.py
+├── tests/test_security_layer.py
+├── tests/test_security_policy.py
+├── tests/test_self_critic.py
+├── tests/test_self_trainer.py
+├── tests/test_sentiment_engine.py
+├── tests/test_skill_forge.py
+├── tests/test_successor_engine.py
+├── tests/test_teaching_engine.py
+├── tests/test_threat_detector.py
+├── tests/test_tool_selection_engine.py
+├── tests/test_train.py
+├── tests/test_training_pipeline.py
+├── tests/test_training_poison_guard.py
+├── tests/test_truth_engine.py
+├── tests/test_truth_verifier.py
+├── tests/test_user_behavior_engine.py
+├── tests/test_user_profiler.py
+├── tests/test_vector_pipeline.py
+├── tests/test_web_intelligence.py
+├── config.yaml
+├── requirements.txt
+├── pyproject.toml
+├── Makefile
+├── .github/DESCRIPTION.md
+```
 
 ## Component Reference
 
@@ -311,11 +493,10 @@ scratch, evaluates perplexity, and writes an admin notification
 if the new model is better. Admin approves via API — the engine
 never auto-deploys.
 
-### GirivinityModel — `model/architecture.py`
+### GirivinityModel — `app/llm/girivinity_architecture.py`
 Custom decoder-only transformer. PyTorch only — no HuggingFace.
 Components: RMSNorm, RoPE, Grouped Query Attention (16 heads,
-4 KV heads), SwiGLU FFN, weight-tied LM head. ~360M parameters
-at full config. KV-cache supported for fast autoregressive
+4 KV heads), SwiGLU FFN, weight-tied LM head. The model family starts at 3B parameters (Girivinity-3B), scaling to 70B and beyond through the structured generation roadmap. KV-cache supported for fast autoregressive
 inference. Quantised to Q4_K_M GGUF via llama.cpp for CPU
 inference on 4GB RAM.
 
@@ -344,6 +525,7 @@ Response: { "notifications": [
   { "type": "successor_ready", "version": "20240101_120000",
     "previous_version": "none", "improvement_percent": 12.5,
     "trained_on_chunks": 105000, "perplexity": 38.4,
+    "quantization_status": "quantized",
     "timestamp": "ISO8601", "status": "awaiting_admin_approval" }
 ]}
 ```
@@ -373,7 +555,7 @@ Response: { "status": "recorded" }
 
 **GET /health** → `{ "status": "ok", "service": "girivinity" }`
 
-**GET /health/deep** → `{ "status": "ok|degraded", "issues": [] }`
+**GET /health/deep** → `{ "status": "ok|degraded", "issues": [], "compute": { ... } }`
 
 ---
 
@@ -381,13 +563,40 @@ Response: { "status": "recorded" }
 
 ### Requirements
 
-| Resource | Minimum | Recommended |
-|----------|---------|-------------|
+| Resource | Minimum (CPU mode) | Recommended (GPU mode) |
+|---|---|---|
 | RAM | 4 GB | 8 GB |
 | CPU | 2 cores | 4 cores |
 | Storage | 20 GB | 40 GB |
+| GPU | Not required | 6GB+ VRAM (RTX 3060 or better) |
 | OS | Ubuntu 22.04 | Ubuntu 22.04 |
-| GPU | Not required | Optional (speeds training) |
+
+### GPU vs CPU Mode
+
+Girivinity detects your hardware automatically at startup. You never need to change config.
+
+| Operation | CPU Mode | GPU Mode |
+|---|---|---|
+| Inference | float32, slower | 4-bit NF4 quantized, 5-10x faster |
+| LoRA fine-tuning | Runs, takes longer | AMP float16, much faster |
+| Pretraining | Possible but slow | Recommended, use gradient checkpointing |
+| Successor retraining | Hours to days | Minutes to hours |
+| Min RAM / VRAM | 4GB RAM | 6GB VRAM |
+| Cost | Free (any VPS) | ~$0.35/hr (Lambda Labs T4) |
+
+**To force CPU mode** (e.g. for testing):
+```yaml
+# config.yaml
+compute:
+  device: "cpu"
+```
+
+**To verify which mode is active:**
+```bash
+curl http://localhost:8000/health/deep
+# Returns: "compute": {"device": "cuda", "gpu_name": "...", "inference_mode": "4bit_nf4_gpu"}
+# Or:      "compute": {"device": "cpu", "inference_mode": "float32_cpu"}
+```
 
 ---
 
@@ -438,7 +647,7 @@ EOF
 ### Step 4 — Train the tokeniser
 
 ```bash
-python model/tokeniser.py
+python app/llm/girivinity_tokenizer.py
 ```
 
 Expected output:
@@ -498,13 +707,7 @@ start it in a screen or tmux session:
 
 ```bash
 screen -S girivinity-train
-python model/train.py \
-  --data data/training_queue \
-  --tokeniser models/tokeniser/tokeniser.json \
-  --output models/base \
-  --epochs 3 \
-  --batch 2 \
-  --grad-accum 8
+python -m app.training.pretrain --config config.yaml
 ```
 
 Training logs appear every 100 steps. When complete:
@@ -548,7 +751,7 @@ model:
   quantised_path: models/girivinity_quantised/model.gguf
   n_ctx: 4096
   n_threads: 3        # cpu_count - 1
-  n_gpu_layers: 0     # 0 = CPU only
+  n_gpu_layers: 0     # 0 = CPU fallback for GGUF inference
 
 training:
   queue_db: data/training.db
@@ -700,13 +903,126 @@ successor_engine:
 rag:
   chroma_path: data/chroma
 
-architecture:
-  dim: 1024
-  n_layers: 16
-  n_heads: 16
-  n_kv_heads: 4
-  vocab_size: 32000
-  max_seq_len: 4096
+model:
+  # Set true after running app/training/pretrain.py to use Girivinity's own weights
+  use_native_model: false
+  # Set to 'girivinity-native' to use own trained model, or a HuggingFace model_id for the HF path
+  model_id: girivinity-native
+  architecture:
+    vocab_size: 65536
+    max_seq_len: 32768
+    dim: 2048
+    n_layers: 24
+    n_heads: 16
+    n_kv_heads: 4
+```
+
+---
+
+## Serving the API to Others
+
+Girivinity exposes a standard REST API. Any developer, app, or service
+can connect to it once it is running.
+
+### Public API (direct server)
+
+If your server has a public IP, the API is immediately accessible:
+
+```bash
+# From any machine
+curl -X POST http://YOUR_SERVER_IP:8000/chat/message \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is machine learning?", "user_id": "user1"}'
+```
+
+### Add API Key Authentication
+
+To protect your API before making it public, add a key check. In `app/main.py`,
+add this middleware:
+
+```python
+from fastapi import Request, HTTPException
+
+API_KEY = "your-secret-key-here"  # Move to .env in production
+
+@app.middleware("http")
+async def api_key_middleware(request: Request, call_next):
+    if request.url.path.startswith("/chat") or request.url.path.startswith("/admin"):
+        key = request.headers.get("X-API-Key")
+        if key != API_KEY:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+    return await call_next(request)
+```
+
+Callers then pass the key:
+
+```bash
+curl -X POST http://YOUR_IP:8000/chat/message \
+  -H "X-API-Key: your-secret-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Hello", "user_id": "user1"}'
+```
+
+### Expose via Nginx (recommended for production)
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+### Python SDK usage example
+
+```python
+import requests
+
+class GirivinityClient:
+    def __init__(self, base_url: str, api_key: str):
+        self.base_url = base_url
+        self.headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+
+    def ask(self, query: str, user_id: str = "default") -> dict:
+        response = requests.post(
+            f"{self.base_url}/chat/message",
+            headers=self.headers,
+            json={"query": query, "user_id": user_id}
+        )
+        return response.json()
+
+# Usage
+client = GirivinityClient("http://your-server:8000", "your-api-key")
+result = client.ask("What is deep learning?")
+print(result["answer"])
+```
+
+### Rate Limiting (optional)
+
+Install slowapi:
+
+```bash
+pip install slowapi
+```
+
+Add to `app/main.py`:
+
+```python
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+
+@app.post("/chat/message")
+@limiter.limit("10/minute")
+async def chat(request: Request, ...):
+    ...
 ```
 
 ---
@@ -715,6 +1031,8 @@ architecture:
 
 - [ ] Admin web dashboard (approve successors via UI)
 - [ ] Hindi and regional Indian language support
+- [ ] Girivinity-7B training run (Generation 2)
+- [ ] Girivinity-13B training run (Generation 3)
 - [ ] Multi-GPU training for successor models
 - [ ] Streaming successor training progress via WebSocket
 - [ ] Domain-specific knowledge packs (medical, legal, engineering)
