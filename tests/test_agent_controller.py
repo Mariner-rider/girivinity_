@@ -1,5 +1,5 @@
 from agent_controller import AgentController
-from core import query_router
+from app.core import query_router
 
 
 def test_task_routing_includes_all_agents():
