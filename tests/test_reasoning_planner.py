@@ -2,7 +2,7 @@ import json
 
 from agent_controller import AgentController
 from app.reasoning_planner import ReasoningPlanner
-from core import query_router
+from app.core import query_router
 
 
 def test_reasoning_planner_outputs_structured_json_plan():
