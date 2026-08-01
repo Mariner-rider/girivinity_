@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import os
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,6 +21,21 @@ def _cfg() -> dict:
     return yaml.safe_load(Path("config.yaml").read_text())["database"]
 
 
+def _password(cfg: dict) -> str:
+    # Never store the real password in config.yaml (it's committed to git).
+    # DATABASE_PASSWORD env var takes precedence; config.yaml may still hold
+    # a value for local/dev convenience, but production should always set
+    # the env var instead.
+    password = os.environ.get("DATABASE_PASSWORD") or cfg.get("password")
+    if not password:
+        raise RuntimeError(
+            "Database password not configured. Set the DATABASE_PASSWORD "
+            "environment variable (see .env.example) or add 'password' "
+            "under 'database:' in config.yaml for local development."
+        )
+    return password
+
+
 def get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     global _POOL
     with _POOL_LOCK:
@@ -32,7 +48,7 @@ def get_pool() -> psycopg2.pool.ThreadedConnectionPool:
                 port=int(cfg["port"]),
                 dbname=cfg["name"],
                 user=cfg["user"],
-                password=cfg["password"],
+                password=_password(cfg),
             )
             logger.info("PostgreSQL pool created → %s:%s/%s", cfg["host"], cfg["port"], cfg["name"])
     return _POOL
