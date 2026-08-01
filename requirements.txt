@@ -60,3 +60,7 @@ sentencepiece>=0.2.0
 nvdlib>=0.7.7
 tenacity>=8.2.3
 mitreattack-python>=3.0.0
+
+# === CONFIG / CORE UTILITIES ===
+pyyaml>=6.0.1
+psycopg2-binary>=2.9.9
