@@ -333,7 +333,7 @@ class CUDAEngine:
     def _static_analysis(self, kernel_code: str) -> KernelProfile:
         score = 0.0
         warnings = []
-        checks = {"__shared__": 20.0, "__restrict__": 10.0, "__syncthreads": 10.0, "__shfl": 15.0, "cp.async": 15.0, "cudaGetLastError": 10.0, "threadIdx": 5.0, "blockIdx": 5.0, "if (.*idx.* < ": 10.0}
+        checks = {"__shared__": 20.0, "__restrict__": 10.0, "__syncthreads": 10.0, "__shfl": 15.0, "cp.async": 15.0, "cudaGetLastError": 10.0, "threadIdx": 5.0, "blockIdx": 5.0, r"if \(.*idx.* < ": 10.0}
         missing_warns = {"__shared__": "No shared memory — likely suboptimal memory access", "__restrict__": "Missing __restrict__ — compiler cannot assume non-aliasing", "cudaGetLastError": "No error checking — add cudaGetLastError()"}
         for pattern, pts in checks.items():
             if re.search(pattern, kernel_code):

@@ -30,7 +30,7 @@ scipy>=1.13.0
 
 # === COGNITIVE / NLP ===
 spacy>=3.7.4                     # NLP pipeline, NER, dependency parse
-en-core-web-sm                   # spaCy English model
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl   # spaCy English model
 vaderSentiment>=3.3.2            # Rule-based sentiment (fast, CPU)
 transformers[sentencepiece]
 textblob>=0.18.0
@@ -49,7 +49,6 @@ stix2>=3.0.1                     # STIX/TAXII threat intel format
 scrapy>=2.11.0
 playwright>=1.43.0
 trafilatura>=1.9.0
-spacy>=3.7.0
 llama-cpp-python>=0.2.77
 bitsandbytes>=0.43.0
 accelerate>=0.29.0
@@ -64,3 +63,4 @@ mitreattack-python>=3.0.0
 # === CONFIG / CORE UTILITIES ===
 pyyaml>=6.0.1
 psycopg2-binary>=2.9.9
+prometheus-client>=0.20.0
