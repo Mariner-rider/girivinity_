@@ -41,14 +41,14 @@ model:
   trust_remote_code: false
   attn_implementation: "flash_attention_2"
 
-  # Architecture (current generation — 3B Phi-3-mini spec)
+  # Architecture (3B spec, matches model/architecture.py's verified defaults)
   architecture:
     vocab_size: 65536
     max_seq_len: 32768
-    dim: 2048
-    n_layers: 24
-    n_heads: 16
-    n_kv_heads: 4
+    dim: 3072
+    n_layers: 28
+    n_heads: 24
+    n_kv_heads: 8
     ffn_multiplier: 2.667
     norm_eps: 0.00001
     rope_theta: 500000.0
