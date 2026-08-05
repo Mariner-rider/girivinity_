@@ -88,7 +88,7 @@ class TruthEngine:
         for s in sentences:
             s = s.strip()
             if (
-                len(s) > 20
+                len(s) > 8
                 and not s.startswith("Source")
                 and not s.startswith("[")
                 and not s.startswith("http")
