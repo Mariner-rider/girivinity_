@@ -215,18 +215,6 @@ training:
     use_amp: true
     use_fsdp: false
     device: "auto"
-    model_config:
-      vocab_size: 65536
-      hidden_dim: 2048
-      num_heads: 16
-      num_layers: 24
-      ffn_dim: 8192
-      max_seq_len: 4096
-      dropout: 0.1
-      use_rope: true
-      use_gqa: true
-      num_kv_heads: 4
-      use_rmsnorm: true
 
 # ============================================================
 # SECURITY
