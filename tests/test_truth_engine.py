@@ -1,7 +1,9 @@
+import builtins
 from unittest.mock import MagicMock, patch
 
 
 def _make_engine():
+    real_open = builtins.open
     mock_client = MagicMock()
     mock_col = MagicMock()
     mock_client.get_or_create_collection.return_value = mock_col
@@ -14,7 +16,7 @@ def _make_engine():
                 "rag:\n  chroma_path: /tmp/chroma\n"
             )
             if str(p) == "config.yaml"
-            else open(p, *a, **k),
+            else real_open(p, *a, **k),
         ):
             with patch("yaml.safe_load", return_value={
                 "rag": {"chroma_path": "/tmp/chroma"}
