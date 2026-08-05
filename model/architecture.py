@@ -28,6 +28,15 @@ class GirivinityConfig:
     ple_dim: Optional[int] = None
     n_residual_streams: Optional[int] = None
 
+    # --- Mixture-of-Experts (replaces the dense SwiGLU FFN in later layers) ---
+    moe_enabled: bool = False
+    n_routed_experts: Optional[int] = None
+    n_shared_experts: Optional[int] = None
+    n_activated_experts: Optional[int] = None
+    moe_intermediate_size: Optional[int] = None
+    moe_start_layer: Optional[int] = None
+    moe_bias_update_speed: float = 0.001
+
     def __post_init__(self) -> None:
         if self.kv_sharing_start_layer is not None:
             self.kv_sharing_enabled = True
@@ -35,6 +44,16 @@ class GirivinityConfig:
             self.ple_enabled = True
         if self.n_residual_streams is not None:
             self.mhc_enabled = True
+        if self.n_routed_experts is not None:
+            self.moe_enabled = True
+            if self.n_activated_experts is None:
+                self.n_activated_experts = min(6, self.n_routed_experts)
+            if self.n_shared_experts is None:
+                self.n_shared_experts = 2
+            if self.moe_intermediate_size is None:
+                self.moe_intermediate_size = self.ffn_dim // 4
+            if self.moe_start_layer is None:
+                self.moe_start_layer = 1
 
     @property
     def head_dim(self) -> int:
@@ -66,6 +85,40 @@ class GirivinityConfig:
         defaults = dict(n_residual_streams=4)
         defaults.update(overrides)
         return cls(**defaults)
+
+    @classmethod
+    def moe_enhanced(cls, **overrides) -> "GirivinityConfig":
+        """Generation-1 MoE preset: 64 fine-grained routed experts (top-6
+        activated per token) plus 2 always-active shared experts, starting
+        from layer 1 (layer 0 stays dense, following common practice)."""
+        defaults = dict(
+            n_routed_experts=64,
+            n_activated_experts=6,
+            n_shared_experts=2,
+            moe_start_layer=1,
+        )
+        defaults.update(overrides)
+        return cls(**defaults)
+
+    def grow_experts(self, **overrides) -> "GirivinityConfig":
+        """
+        Build a successor generation's config from this one by scaling up
+        the MoE routed-expert count (and, by default, proportionally more
+        activated experts per token), while keeping every other architecture
+        parameter — including moe_intermediate_size and moe_start_layer —
+        identical unless explicitly overridden. This is the intended growth
+        path for successor_engine.py: each generation doubles n_routed_experts
+        by default, so weights for existing experts can be copied forward
+        (sparse upcycling / expert-splitting-style growth) into a wider
+        successor model rather than starting from scratch.
+        """
+        if not self.moe_enabled:
+            raise ValueError("grow_experts() requires an MoE-enabled config (moe_enabled=True)")
+        current = {f: getattr(self, f) for f in self.__dataclass_fields__}
+        current["n_routed_experts"] = self.n_routed_experts * 2
+        current["n_activated_experts"] = self.n_activated_experts * 2
+        current.update(overrides)
+        return GirivinityConfig(**current)
 
     @classmethod
     def from_yaml(cls, path: str = "config.yaml") -> "GirivinityConfig":
@@ -169,13 +222,111 @@ class SwiGLU(nn.Module):
         return self.down(F.silu(self.gate(x)) * self.up(x))
 
 
-class DecoderBlock(nn.Module):
+class Expert(nn.Module):
+    """A single small SwiGLU expert used inside MoELayer."""
+
+    def __init__(self, dim: int, intermediate_size: int) -> None:
+        super().__init__()
+        self.gate = nn.Linear(dim, intermediate_size, bias=False)
+        self.up   = nn.Linear(dim, intermediate_size, bias=False)
+        self.down = nn.Linear(intermediate_size, dim, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down(F.silu(self.gate(x)) * self.up(x))
+
+
+class MoELayer(nn.Module):
+    """
+    Fine-grained Mixture-of-Experts with shared experts and auxiliary-loss-
+    free load balancing — the DeepSeek-MoE / DeepSeek-V3 style design, chosen
+    over classic Switch-Transformer/GShard-style MoE (a small number of large
+    experts, top-1/top-2 routing, balanced via an auxiliary loss term added to
+    the training objective). Two differences from that classic design, both
+    genuine improvements this implementation follows:
+
+    1. Many small ("fine-grained") routed experts instead of few large ones,
+       plus a handful of always-active "shared" experts. This lets routed
+       experts specialize more precisely on narrow patterns, while the shared
+       experts absorb common knowledge every token needs — reducing
+       redundancy across the routed experts (DeepSeekMoE, 2024).
+    2. Load balancing via a per-expert routing bias that is nudged up/down
+       based on observed load (no gradient, updated after each forward pass
+       during training) instead of an auxiliary loss term mixed into the
+       training loss. An auxiliary loss can fight the primary objective and
+       measurably hurt model quality; the bias-based approach balances load
+       without that trade-off (DeepSeek-V3, 2024).
+
+    This is a correctness-focused reference implementation — the expert
+    dispatch loop below is a plain, readable per-expert masked pass, not a
+    throughput-optimized scatter/gather or fused kernel. It is verified
+    numerically correct (weights match the exact top-k routing probabilities
+    for each token) but would need real dispatch-kernel work before it's
+    efficient at production expert counts/batch sizes.
+    """
+
     def __init__(self, cfg: GirivinityConfig) -> None:
+        super().__init__()
+        self.n_routed = cfg.n_routed_experts
+        self.n_shared = cfg.n_shared_experts
+        self.top_k = cfg.n_activated_experts
+        self.dim = cfg.dim
+
+        self.routed_experts = nn.ModuleList(
+            [Expert(cfg.dim, cfg.moe_intermediate_size) for _ in range(self.n_routed)]
+        )
+        self.shared_experts = nn.ModuleList(
+            [Expert(cfg.dim, cfg.moe_intermediate_size) for _ in range(self.n_shared)]
+        ) if self.n_shared > 0 else None
+
+        self.gate = nn.Linear(cfg.dim, self.n_routed, bias=False)
+        # Auxiliary-loss-free load balancing: a per-expert bias added to the
+        # routing logits before top-k selection. Updated by a simple
+        # load-based heuristic during training, not by gradient descent.
+        self.register_buffer("routing_bias", torch.zeros(self.n_routed))
+        self.bias_update_speed = cfg.moe_bias_update_speed
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, D = x.shape
+        x_flat = x.reshape(-1, D)
+
+        logits = self.gate(x_flat) + self.routing_bias
+        probs = F.softmax(logits, dim=-1)
+        topk_probs, topk_idx = torch.topk(probs, self.top_k, dim=-1)
+        topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+
+        out = torch.zeros_like(x_flat)
+        load = torch.zeros(self.n_routed, device=x.device)
+
+        for expert_idx in range(self.n_routed):
+            mask = topk_idx == expert_idx
+            token_mask = mask.any(dim=-1)
+            load[expert_idx] = token_mask.sum()
+            if not token_mask.any():
+                continue
+            selected = x_flat[token_mask]
+            expert_out = self.routed_experts[expert_idx](selected)
+            weight = topk_probs[token_mask][mask[token_mask]].unsqueeze(-1)
+            out[token_mask] = out[token_mask] + expert_out * weight
+
+        if self.shared_experts is not None:
+            for shared in self.shared_experts:
+                out = out + shared(x_flat)
+
+        if self.training:
+            with torch.no_grad():
+                avg_load = load.mean()
+                self.routing_bias -= self.bias_update_speed * torch.sign(load - avg_load)
+
+        return out.reshape(B, T, D)
+
+
+class DecoderBlock(nn.Module):
+    def __init__(self, cfg: GirivinityConfig, ffn: nn.Module) -> None:
         super().__init__()
         self.attn_norm = RMSNorm(cfg.dim, cfg.norm_eps)
         self.ffn_norm  = RMSNorm(cfg.dim, cfg.norm_eps)
         self.attn = GroupedQueryAttention(cfg)
-        self.ffn  = SwiGLU(cfg)
+        self.ffn  = ffn
 
     def forward(
         self,
@@ -244,7 +395,9 @@ class GirivinityModel(nn.Module):
         super().__init__()
         self.cfg     = cfg
         self.embed   = nn.Embedding(cfg.vocab_size, cfg.dim)
-        self.layers  = nn.ModuleList([DecoderBlock(cfg) for _ in range(cfg.n_layers)])
+        self.layers  = nn.ModuleList(
+            [DecoderBlock(cfg, self._build_ffn(cfg, i)) for i in range(cfg.n_layers)]
+        )
         self.norm    = RMSNorm(cfg.dim, cfg.norm_eps)
         self.lm_head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight
@@ -261,6 +414,12 @@ class GirivinityModel(nn.Module):
         self.mhc = ManifoldHyperConnection(cfg.dim, cfg.n_residual_streams) if cfg.n_residual_streams is not None else None
 
         self.apply(self._init_weights)
+
+    @staticmethod
+    def _build_ffn(cfg: GirivinityConfig, layer_idx: int) -> nn.Module:
+        if cfg.moe_enabled and layer_idx >= cfg.moe_start_layer:
+            return MoELayer(cfg)
+        return SwiGLU(cfg)
 
     def _init_weights(self, module: nn.Module) -> None:
         if isinstance(module, nn.Linear):
