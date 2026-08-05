@@ -52,7 +52,12 @@ def _load_module(monkeypatch, collection):
     monkeypatch.setitem(
         sys.modules,
         "sentence_transformers",
-        types.SimpleNamespace(util=types.SimpleNamespace(cos_sim=lambda *_: FakeCos())),
+        types.SimpleNamespace(
+            SentenceTransformer=lambda *a, **k: types.SimpleNamespace(
+                encode=lambda *a, **k: [0.1] * 384
+            ),
+            util=types.SimpleNamespace(cos_sim=lambda *_: FakeCos()),
+        ),
     )
 
     import app.core.query_router as query_router
