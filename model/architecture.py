@@ -37,6 +37,12 @@ class GirivinityConfig:
     moe_start_layer: Optional[int] = None
     moe_bias_update_speed: float = 0.001
 
+    # --- QK-Norm (Qwen3 / Gemma3 style attention-stability improvement) ---
+    qk_norm_enabled: bool = False
+
+    # --- RoPE context-extension scaling (for inference beyond max_seq_len) ---
+    rope_scaling_factor: float = 1.0
+
     def __post_init__(self) -> None:
         if self.kv_sharing_start_layer is not None:
             self.kv_sharing_enabled = True
@@ -141,9 +147,20 @@ class RMSNorm(nn.Module):
         return norm * self.weight
 
 
-def build_rope_cache(seq_len: int, head_dim: int, theta: float, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+def build_rope_cache(
+    seq_len: int, head_dim: int, theta: float, device: torch.device, scaling_factor: float = 1.0
+) -> tuple[torch.Tensor, torch.Tensor]:
     freqs = 1.0 / (theta ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim))
     t = torch.arange(seq_len, device=device).float()
+    if scaling_factor != 1.0:
+        # Linear position-interpolation scaling: stretches the effective
+        # position sequence so a model trained at max_seq_len can run at
+        # scaling_factor * max_seq_len positions without retraining, at some
+        # cost to short-context precision. This is the simplest RoPE
+        # context-extension method; NTK-aware / YaRN scaling (which only
+        # stretches low frequencies, preserving high-frequency precision for
+        # nearby tokens) is a stronger follow-up upgrade over this.
+        t = t / scaling_factor
     freqs = torch.outer(t, freqs)
     cos = torch.cos(freqs)
     sin = torch.sin(freqs)
@@ -174,6 +191,14 @@ class GroupedQueryAttention(nn.Module):
         self.v_proj = nn.Linear(cfg.dim, cfg.n_kv_heads * cfg.head_dim, bias=False)
         self.o_proj = nn.Linear(cfg.n_heads * cfg.head_dim, cfg.dim, bias=False)
 
+        # QK-Norm (Qwen3 / Gemma3 style): per-head RMSNorm on queries and
+        # keys, applied right after projection and before RoPE, to stabilize
+        # attention logit magnitudes at scale.
+        self.qk_norm_enabled = cfg.qk_norm_enabled
+        if self.qk_norm_enabled:
+            self.q_norm = RMSNorm(self.head_dim, cfg.norm_eps)
+            self.k_norm = RMSNorm(self.head_dim, cfg.norm_eps)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -185,6 +210,8 @@ class GroupedQueryAttention(nn.Module):
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         B, T, _ = x.shape
         q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        if self.qk_norm_enabled:
+            q = self.q_norm(q)
         q = apply_rope(q, cos, sin)
 
         if shared_kv is not None:
@@ -193,6 +220,8 @@ class GroupedQueryAttention(nn.Module):
         else:
             k = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
             v = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
+            if self.qk_norm_enabled:
+                k = self.k_norm(k)
             k = apply_rope(k, cos, sin)
             if kv_cache is not None:
                 k_cache, v_cache = kv_cache
@@ -403,11 +432,12 @@ class GirivinityModel(nn.Module):
         self.lm_head.weight = self.embed.weight
         self.gradient_checkpointing = False
 
-        cos, sin = build_rope_cache(cfg.max_seq_len, cfg.head_dim, cfg.rope_theta, torch.device("cpu"))
+        effective_seq_len = int(cfg.max_seq_len * cfg.rope_scaling_factor)
+        cos, sin = build_rope_cache(effective_seq_len, cfg.head_dim, cfg.rope_theta, torch.device("cpu"), cfg.rope_scaling_factor)
         self.register_buffer("rope_cos", cos, persistent=False)
         self.register_buffer("rope_sin", sin, persistent=False)
 
-        causal_mask = torch.full((cfg.max_seq_len, cfg.max_seq_len), float("-inf")).triu(1)
+        causal_mask = torch.full((effective_seq_len, effective_seq_len), float("-inf")).triu(1)
         self.register_buffer("causal_mask_full", causal_mask, persistent=False)
 
         self.ple = PerLayerEmbedding(cfg.vocab_size, cfg.ple_dim, cfg.dim, cfg.n_layers) if cfg.ple_dim is not None else None
