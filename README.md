@@ -248,6 +248,10 @@ girivinity/
 ├── agent_controller.py
 ├── app/__init__.py
 ├── app/agents/__init__.py
+├── app/agents/adaptive_agent_executor.py
+├── app/agents/agent_registry.py
+├── app/agents/base_agent.py
+├── app/agents/capability_merger.py
 ├── app/agents/controller.py
 ├── app/agents/self_critic.py
 ├── app/analytics/__init__.py
@@ -262,10 +266,15 @@ girivinity/
 ├── app/api/routes/security.py
 ├── app/api/routes/skills.py
 ├── app/api/routes/tenant_security.py
+├── app/cognition/__init__.py
+├── app/cognition/calibration.py
+├── app/cognition/causal_reasoner.py
+├── app/cognition/episodic_memory.py
+├── app/cognition/sentiment_engine.py
+├── app/cognition/theory_of_mind.py
 ├── app/core/__init__.py
 ├── app/core/agent_forge.py
 ├── app/core/agent_orchestrator.py
-├── app/agents/agent_registry.py
 ├── app/core/agent_runner.py
 ├── app/core/citation_engine.py
 ├── app/core/cognitive_engine.py
@@ -279,6 +288,7 @@ girivinity/
 ├── app/core/llm_synthesiser.py
 ├── app/core/memory_engine.py
 ├── app/core/migrations.py
+├── app/core/model_generation_policy.py
 ├── app/core/query_router.py
 ├── app/core/self_trainer.py
 ├── app/core/sentiment_engine.py
@@ -316,7 +326,6 @@ girivinity/
 ├── app/finetune/lora_trainer.py
 ├── app/finetune/update_gate.py
 ├── app/llm/__init__.py
-├── app/llm/girivinity_architecture.py
 ├── app/llm/girivinity_tokenizer.py
 ├── app/llm/loader.py
 ├── app/main.py
@@ -326,10 +335,14 @@ girivinity/
 ├── app/monitoring/logging.py
 ├── app/monitoring/metrics.py
 ├── app/multimodal/__init__.py
+├── app/multimodal/audio_encoder.py
+├── app/multimodal/fusion_layer.py
 ├── app/multimodal/processor.py
+├── app/multimodal/vision_encoder.py
 ├── app/profiling/__init__.py
 ├── app/profiling/user_profiler.py
 ├── app/rag/__init__.py
+├── app/rag/rag_engine.py
 ├── app/rag/system.py
 ├── app/rag/truth_verifier.py
 ├── app/reasoning_planner.py
@@ -339,6 +352,7 @@ girivinity/
 ├── app/security/anomaly_scorer.py
 ├── app/security/cyber_shield.py
 ├── app/security/emergency_shutdown.py
+├── app/security/intelligence.py
 ├── app/security/jailbreak_classifier.py
 ├── app/security/layer.py
 ├── app/security/model_steal_detector.py
@@ -350,6 +364,7 @@ girivinity/
 ├── app/security/rasp/rasp_engine.py
 ├── app/security/rasp/runtime_interceptor.py
 ├── app/security/rasp/self_healer.py
+├── app/security/rasp_api.py
 ├── app/security/rate_limiter.py
 ├── app/security/session_manager.py
 ├── app/security/tenant_security.py
@@ -359,20 +374,27 @@ girivinity/
 ├── app/training/benchmarking.py
 ├── app/training/model_evolution.py
 ├── app/training/pretrain.py
+├── app/training/self_improvement_loop.py
+├── code_intelligence_engine.py
 ├── config_loader.py
-├── core/__init__.py
-├── core/query_router.py
-├── core/self_trainer.py
-├── core/successor_engine.py
-├── core/truth_engine.py
-├── core/web_intelligence.py
 ├── crawler_engine/__init__.py
 ├── crawler_engine/engine.py
+├── instruction_following_engine.py
+├── inter_model_protocol.py
 ├── knowledge_distillation_engine.py
+├── language_router.py
 ├── llm_engine.py
 ├── llm_loader.py
-├── model/                       # Legacy compatibility/export utilities; native LLM code lives in app/llm/
+├── model/__init__.py
+├── model/architecture.py
+├── model/domain_trainer.py
+├── model/inference.py
+├── model/quantise.py
+├── model/tokeniser.py
+├── model/train.py
+├── model/training_pipeline.py
 ├── multimodal_engine.py
+├── response_planning_engine.py
 ├── tests/test_agent_controller.py
 ├── tests/test_agent_mode.py
 ├── tests/test_ai_threat_reasoner.py
@@ -381,7 +403,6 @@ girivinity/
 ├── tests/test_architecture.py
 ├── tests/test_architecture_3b.py
 ├── tests/test_architecture_v2.py
-├── tests/test_base_model.py
 ├── tests/test_benchmarking_system.py
 ├── tests/test_chat_endpoint.py
 ├── tests/test_citation_engine.py
@@ -399,7 +420,6 @@ girivinity/
 ├── tests/test_db.py
 ├── tests/test_domain_router.py
 ├── tests/test_emergency_shutdown.py
-├── tests/test_girivinity_model.py
 ├── tests/test_instruction_following_engine.py
 ├── tests/test_inter_model_protocol.py
 ├── tests/test_knowledge_distillation_engine.py
@@ -410,9 +430,11 @@ girivinity/
 ├── tests/test_memory_system.py
 ├── tests/test_model_evolution.py
 ├── tests/test_model_inference.py
+├── tests/test_moe.py
 ├── tests/test_multimodal_engine.py
 ├── tests/test_policy_engine.py
 ├── tests/test_project_structure.py
+├── tests/test_qk_norm_and_rope_scaling.py
 ├── tests/test_query_router.py
 ├── tests/test_rag_system.py
 ├── tests/test_rasp.py
@@ -493,12 +515,20 @@ scratch, evaluates perplexity, and writes an admin notification
 if the new model is better. Admin approves via API — the engine
 never auto-deploys.
 
-### GirivinityModel — `app/llm/girivinity_architecture.py`
+### GirivinityModel — `model/architecture.py`
 Custom decoder-only transformer. PyTorch only — no HuggingFace.
-Components: RMSNorm, RoPE, Grouped Query Attention (16 heads,
-4 KV heads), SwiGLU FFN, weight-tied LM head. The model family starts at 3B parameters (Girivinity-3B), scaling to 70B and beyond through the structured generation roadmap. KV-cache supported for fast autoregressive
-inference. Quantised to Q4_K_M GGUF via llama.cpp for CPU
-inference on 4GB RAM.
+Components: RMSNorm, RoPE (with optional linear-scaling context
+extension via `rope_scaling_factor`), Grouped Query Attention (24 heads,
+8 KV heads, optionally QK-Norm-stabilized), SwiGLU FFN (or Mixture-of-
+Experts in later layers — fine-grained routed experts plus always-active
+shared experts, auxiliary-loss-free load balancing, DeepSeek-MoE/V3
+style), optional cross-layer KV-sharing, optional per-layer embeddings
+(PLE), optional manifold-constrained hyper-connections (mHC) for multi-
+stream residual mixing, weight-tied LM head. The model family starts at
+3B parameters (Girivinity-3B), scaling to 70B and beyond through the
+structured generation roadmap. KV-cache supported for fast autoregressive
+inference. **GGUF export is not currently functional — see the warning in
+Deployment Guide Step 7.**
 
 ---
 
@@ -719,7 +749,18 @@ Press `Ctrl+A, D` to detach from screen.
 
 ### Step 7 — Quantise to GGUF
 
-Required for CPU inference. First clone llama.cpp:
+**⚠️ This step does not currently work.** `model/quantise.py` writes an
+HF-style config claiming a custom `GirivinityForCausalLM` architecture,
+but that class is not registered anywhere — not in this repo, not in
+`transformers`, not in `llama.cpp`. `llama.cpp`'s converter only
+recognizes a fixed set of known architectures and will fail on this
+config. GGUF export needs either a custom `llama.cpp` architecture
+plugin or a from-scratch GGUF writer using the `gguf` Python package
+directly — this is tracked as open work, not yet implemented. Skip this
+step and Step 8's `quantised_path` config for now; run inference directly
+against the PyTorch checkpoint from Step 6 instead.
+
+Required for CPU inference once implemented. First clone llama.cpp:
 
 ```bash
 git clone https://github.com/ggerganov/llama.cpp
@@ -911,10 +952,10 @@ model:
   architecture:
     vocab_size: 65536
     max_seq_len: 32768
-    dim: 2048
-    n_layers: 24
-    n_heads: 16
-    n_kv_heads: 4
+    dim: 3072
+    n_layers: 28
+    n_heads: 24
+    n_kv_heads: 8
 ```
 
 ---
