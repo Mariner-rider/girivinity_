@@ -34,11 +34,14 @@ class FakeEmbedder:
 
 
 class FakeCos:
+    def __init__(self, n: int = 1) -> None:
+        self.n = n
+
     def __getitem__(self, idx):
         return self
 
     def tolist(self):
-        return [0.9, 0.8, 0.7]
+        return [0.9] * self.n
 
 
 def _load_module(monkeypatch, collection):
@@ -56,7 +59,7 @@ def _load_module(monkeypatch, collection):
             SentenceTransformer=lambda *a, **k: types.SimpleNamespace(
                 encode=lambda *a, **k: [0.1] * 384
             ),
-            util=types.SimpleNamespace(cos_sim=lambda *_: FakeCos()),
+            util=types.SimpleNamespace(cos_sim=lambda q, c: FakeCos(len(c))),
         ),
     )
 
