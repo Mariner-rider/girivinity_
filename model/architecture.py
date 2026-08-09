@@ -43,6 +43,14 @@ class GirivinityConfig:
     # --- RoPE context-extension scaling (for inference beyond max_seq_len) ---
     rope_scaling_factor: float = 1.0
 
+    # --- Multi-head Latent Attention (DeepSeek-V2/V3 style compressed KV
+    # cache; replaces GroupedQueryAttention for the whole model when enabled,
+    # not on a per-layer basis like MoE) ---
+    mla_enabled: bool = False
+    mla_d_c: Optional[int] = None
+    mla_d_c_q: Optional[int] = None
+    mla_rope_head_dim: Optional[int] = None
+
     def __post_init__(self) -> None:
         if self.kv_sharing_start_layer is not None:
             self.kv_sharing_enabled = True
@@ -60,6 +68,33 @@ class GirivinityConfig:
                 self.moe_intermediate_size = self.ffn_dim // 4
             if self.moe_start_layer is None:
                 self.moe_start_layer = 1
+        if self.mla_enabled:
+            if self.kv_sharing_enabled:
+                raise ValueError(
+                    "mla_enabled is not currently supported together with "
+                    "kv_sharing (kv_sharing_start_layer): MLA's cache format "
+                    "(compressed latents) is structurally different from "
+                    "GroupedQueryAttention's shared-KV cache format, and the "
+                    "two caching schemes are not compatible in this "
+                    "implementation."
+                )
+            if self.qk_norm_enabled:
+                raise ValueError(
+                    "mla_enabled is not currently supported together with "
+                    "qk_norm_enabled: QK-Norm is implemented specifically for "
+                    "GroupedQueryAttention's per-head Q/K layout and does not "
+                    "yet have an MLA equivalent."
+                )
+            if self.mla_d_c is None:
+                self.mla_d_c = self.head_dim // 2
+            if self.mla_d_c_q is None:
+                self.mla_d_c_q = self.mla_d_c
+            if self.mla_rope_head_dim is None:
+                self.mla_rope_head_dim = self.head_dim // 2
+            if self.mla_rope_head_dim % 2 != 0:
+                # RoPE splits the last dim into two equal halves for
+                # rotation, so this must be even.
+                self.mla_rope_head_dim += 1
 
     @property
     def head_dim(self) -> int:
@@ -240,6 +275,123 @@ class GroupedQueryAttention(nn.Module):
         return self.o_proj(out), new_cache
 
 
+class MultiHeadLatentAttention(nn.Module):
+    """
+    Multi-head Latent Attention (MLA), DeepSeek-V2/V3 style. Queries and
+    keys/values are each projected into a small low-rank latent space
+    before being up-projected back to per-head dimensionality; only the
+    latent vectors (plus a small decoupled RoPE key) are cached across
+    decoding steps, instead of full per-head K/V. This is what shrinks the
+    KV cache from `n_kv_heads * head_dim * 2` floats/token to roughly
+    `mla_d_c + mla_rope_head_dim` floats/token.
+
+    Query and key/value latents are compressed through SEPARATE
+    down-projection matrices (`w_dq` vs `w_dkv`) — queries are never
+    derived from the KV latent. Only the KV latent and the RoPE key are
+    ever cached; query latents are never cached, since queries for past
+    tokens are never needed again during autoregressive decoding.
+
+    RoPE is "decoupled": it's applied only to a small dedicated slice of
+    each head (`mla_rope_head_dim`), not the full head, and the key side
+    of that slice is a single vector shared across every head per token
+    (not one per head) — `w_kr` projects straight from `x`, not from the
+    compressed KV latent. This split exists because RoPE's rotation is
+    position-dependent: a compressed latent computed once and cached can't
+    be correctly "re-rotated" for a different absolute position without
+    re-deriving its un-rotated content, so the position-dependent part is
+    kept small, separate, and applied fresh each step, while the bulk of
+    the cached content (the latent) stays rotation-free and reusable as-is.
+
+    This does not currently compose with `kv_sharing_enabled` or
+    `qk_norm_enabled` (both raise a config error) — see `__post_init__`.
+    """
+
+    def __init__(self, cfg: GirivinityConfig) -> None:
+        super().__init__()
+        self.n_heads    = cfg.n_heads
+        self.n_kv_heads = cfg.n_kv_heads
+        self.head_dim   = cfg.head_dim
+        self.n_rep      = self.n_heads // self.n_kv_heads
+        self.d_c        = cfg.mla_d_c
+        self.d_c_q      = cfg.mla_d_c_q
+        self.rope_dim   = cfg.mla_rope_head_dim
+        self.scale      = (self.head_dim + self.rope_dim) ** -0.5
+
+        # Down-projections into latent space (separate for Q vs KV).
+        self.w_dkv = nn.Linear(cfg.dim, self.d_c, bias=False)
+        self.w_dq  = nn.Linear(cfg.dim, self.d_c_q, bias=False)
+        # Decoupled RoPE key: one small vector per token, shared across
+        # every head — projected straight from x, not from the KV latent.
+        self.w_kr  = nn.Linear(cfg.dim, self.rope_dim, bias=False)
+
+        # Up-projections back to per-(kv-)head content dimensionality.
+        self.w_uk = nn.Linear(self.d_c, self.n_kv_heads * self.head_dim, bias=False)
+        self.w_uv = nn.Linear(self.d_c, self.n_kv_heads * self.head_dim, bias=False)
+        self.w_uq = nn.Linear(self.d_c_q, self.n_heads * self.head_dim, bias=False)
+        # Per-head decoupled RoPE query, up-projected from the query latent.
+        self.w_qr = nn.Linear(self.d_c_q, self.n_heads * self.rope_dim, bias=False)
+
+        self.o_proj = nn.Linear(self.n_heads * self.head_dim, cfg.dim, bias=False)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        kv_cache: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        shared_kv: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        if shared_kv is not None:
+            raise ValueError("MultiHeadLatentAttention does not support kv_sharing's shared_kv")
+
+        B, T, _ = x.shape
+
+        # KV side: compress to the joint latent, derive the decoupled RoPE
+        # key (rotated now, at this chunk's real positions, then cached
+        # post-rotation — matching how GroupedQueryAttention caches K).
+        c_kv_new = self.w_dkv(x)             # [B, T, d_c]
+        k_r_new = self.w_kr(x)               # [B, T, rope_dim]
+        k_r_new = apply_rope(k_r_new, cos, sin)
+
+        if kv_cache is not None:
+            c_kv_cache, k_r_cache = kv_cache
+            c_kv = torch.cat([c_kv_cache, c_kv_new], dim=1)
+            k_r = torch.cat([k_r_cache, k_r_new], dim=1)
+        else:
+            c_kv, k_r = c_kv_new, k_r_new
+        new_cache = (c_kv, k_r)
+
+        T_full = c_kv.shape[1]
+
+        # Up-project the FULL cached latent sequence fresh each step — this
+        # is the MLA trade-off: a tiny cache, at the cost of redoing this
+        # cheap up-projection over the whole sequence every forward call
+        # instead of reusing already-materialized per-head K/V.
+        k_c = self.w_uk(c_kv).view(B, T_full, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v   = self.w_uv(c_kv).view(B, T_full, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        k_r_expanded = k_r.unsqueeze(1).expand(-1, self.n_kv_heads, -1, -1)
+        k = torch.cat([k_c, k_r_expanded], dim=-1)
+
+        # Query side: only ever computed for the current chunk, never cached.
+        c_q = self.w_dq(x)  # [B, T, d_c_q]
+        q_c = self.w_uq(c_q).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        q_r = self.w_qr(c_q).view(B, T, self.n_heads, self.rope_dim).transpose(1, 2)
+        q_r = apply_rope(q_r, cos, sin)
+        q = torch.cat([q_c, q_r], dim=-1)
+
+        k_expanded = k.repeat_interleave(self.n_rep, dim=1)
+        v_expanded = v.repeat_interleave(self.n_rep, dim=1)
+
+        attn = torch.matmul(q, k_expanded.transpose(-2, -1)) * self.scale
+        if mask is not None:
+            attn = attn + mask
+        attn = F.softmax(attn.float(), dim=-1).to(q.dtype)
+        out = torch.matmul(attn, v_expanded)
+        out = out.transpose(1, 2).contiguous().view(B, T, -1)
+        return self.o_proj(out), new_cache
+
+
 class SwiGLU(nn.Module):
     def __init__(self, cfg: GirivinityConfig) -> None:
         super().__init__()
@@ -354,7 +506,7 @@ class DecoderBlock(nn.Module):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.dim, cfg.norm_eps)
         self.ffn_norm  = RMSNorm(cfg.dim, cfg.norm_eps)
-        self.attn = GroupedQueryAttention(cfg)
+        self.attn = MultiHeadLatentAttention(cfg) if cfg.mla_enabled else GroupedQueryAttention(cfg)
         self.ffn  = ffn
 
     def forward(
@@ -433,9 +585,16 @@ class GirivinityModel(nn.Module):
         self.gradient_checkpointing = False
 
         effective_seq_len = int(cfg.max_seq_len * cfg.rope_scaling_factor)
-        cos, sin = build_rope_cache(effective_seq_len, cfg.head_dim, cfg.rope_theta, torch.device("cpu"), cfg.rope_scaling_factor)
-        self.register_buffer("rope_cos", cos, persistent=False)
-        self.register_buffer("rope_sin", sin, persistent=False)
+        if cfg.mla_enabled:
+            mla_cos, mla_sin = build_rope_cache(
+                effective_seq_len, cfg.mla_rope_head_dim, cfg.rope_theta, torch.device("cpu"), cfg.rope_scaling_factor
+            )
+            self.register_buffer("mla_rope_cos", mla_cos, persistent=False)
+            self.register_buffer("mla_rope_sin", mla_sin, persistent=False)
+        else:
+            cos, sin = build_rope_cache(effective_seq_len, cfg.head_dim, cfg.rope_theta, torch.device("cpu"), cfg.rope_scaling_factor)
+            self.register_buffer("rope_cos", cos, persistent=False)
+            self.register_buffer("rope_sin", sin, persistent=False)
 
         causal_mask = torch.full((effective_seq_len, effective_seq_len), float("-inf")).triu(1)
         self.register_buffer("causal_mask_full", causal_mask, persistent=False)
@@ -461,9 +620,21 @@ class GirivinityModel(nn.Module):
         B, T = input_ids.shape
         x = self.embed(input_ids)
 
-        past_len = kv_caches[0][0].shape[2] if kv_caches else 0
-        cos = self.rope_cos[past_len:past_len + T].to(x.device)
-        sin = self.rope_sin[past_len:past_len + T].to(x.device)
+        if kv_caches:
+            # MLA's cache tuples are (c_kv, k_r) with shape [B, T, d_c] /
+            # [B, T, rope_dim] — sequence length is at index 1. GQA's cache
+            # tuples are (k, v) with shape [B, n_kv_heads, T, head_dim] —
+            # sequence length is at index 2.
+            past_len = kv_caches[0][0].shape[1] if self.cfg.mla_enabled else kv_caches[0][0].shape[2]
+        else:
+            past_len = 0
+
+        if self.cfg.mla_enabled:
+            cos = self.mla_rope_cos[past_len:past_len + T].to(x.device)
+            sin = self.mla_rope_sin[past_len:past_len + T].to(x.device)
+        else:
+            cos = self.rope_cos[past_len:past_len + T].to(x.device)
+            sin = self.rope_sin[past_len:past_len + T].to(x.device)
         causal_mask = self.causal_mask_full[past_len:past_len + T, :past_len + T].to(x.device).unsqueeze(0).unsqueeze(0)
 
         streams = None
