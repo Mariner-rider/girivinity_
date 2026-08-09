@@ -1,6 +1,8 @@
 import builtins
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+
 
 def _make_engine():
     real_open = builtins.open
@@ -41,7 +43,7 @@ def test_verify_returns_kb_sourced_on_high_score():
     engine, mock_col = _make_engine()
     mock_col.query.return_value = {"distances": [[0.1]]}
     with patch("app.core.truth_engine.get_embedder") as mock_emb:
-        mock_emb.return_value.encode.return_value = [0.1] * 384
+        mock_emb.return_value.encode.return_value = np.array([0.1] * 384)
         label, url = engine._verify_claim("The sky is blue.", [])
     assert label == "KB_SOURCED"
     assert url is None
@@ -51,7 +53,7 @@ def test_unverified_adds_disclaimer():
     engine, mock_col = _make_engine()
     mock_col.query.return_value = {"distances": [[1.9]]}
     with patch("app.core.truth_engine.get_embedder") as mock_emb:
-        mock_emb.return_value.encode.return_value = [0.1] * 384
+        mock_emb.return_value.encode.return_value = np.array([0.1] * 384)
         result = engine.verify(
             "Claim one is true. Claim two is true. Claim three is true.",
             web_sources=[],
