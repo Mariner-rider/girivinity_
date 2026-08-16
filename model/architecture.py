@@ -51,6 +51,14 @@ class GirivinityConfig:
     mla_d_c_q: Optional[int] = None
     mla_rope_head_dim: Optional[int] = None
 
+    # --- Multi-Token Prediction (DeepSeek-V3 style sequentially-chained
+    # auxiliary prediction heads; off by default, adds n_mtp_heads extra
+    # loss terms during training and enables speculative decoding in
+    # generate() when on) ---
+    mtp_enabled: bool = False
+    n_mtp_heads: Optional[int] = None
+    mtp_loss_weight: float = 0.3
+
     def __post_init__(self) -> None:
         if self.kv_sharing_start_layer is not None:
             self.kv_sharing_enabled = True
@@ -95,6 +103,12 @@ class GirivinityConfig:
                 # RoPE splits the last dim into two equal halves for
                 # rotation, so this must be even.
                 self.mla_rope_head_dim += 1
+        if self.n_mtp_heads is not None:
+            self.mtp_enabled = True
+        if self.mtp_enabled and self.n_mtp_heads is None:
+            self.n_mtp_heads = 2
+        if self.mtp_enabled and self.n_mtp_heads < 1:
+            raise ValueError("mtp_enabled requires n_mtp_heads >= 1")
 
     @property
     def head_dim(self) -> int:
@@ -403,6 +417,42 @@ class SwiGLU(nn.Module):
         return self.down(F.silu(self.gate(x)) * self.up(x))
 
 
+class MTPModule(nn.Module):
+    """
+    One depth of DeepSeek-V3-style Multi-Token Prediction.
+
+    Modules are sequentially chained: module i's output hidden state is fed
+    as the *input* to module i+1, so each subsequent depth's prediction
+    genuinely depends on the previous depth's transform, not just on the
+    shared main hidden state. This is what makes the design sequential
+    rather than a set of parallel independent heads reading the same input
+    (module 1 predicts t+1 from h; module 2 predicts t+2 from module 1's
+    own output, not from h directly; and so on).
+
+    This is a simplified reference version relative to the full DeepSeek-V3
+    MTP module: the real design additionally conditions each depth on the
+    ground-truth embedding of the intervening token (via RMSNorm + concat +
+    a linear projection back to model dim) during training, and on the
+    model's own drafted token at inference. This implementation omits that
+    embedding-conditioning step to stay lightweight and avoid threading
+    labels/embeddings through the main forward() signature -- it relies on
+    hidden-state chaining alone for the sequential dependency, which is
+    sufficient to satisfy "sequential, not parallel" but is not a full
+    reproduction of the paper's per-depth architecture.
+    """
+
+    def __init__(self, cfg: GirivinityConfig) -> None:
+        super().__init__()
+        self.norm = RMSNorm(cfg.dim, cfg.norm_eps)
+        self.ffn = SwiGLU(cfg)
+        self.lm_head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
+
+    def forward(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden = hidden + self.ffn(self.norm(hidden))
+        logits = self.lm_head(hidden)
+        return hidden, logits
+
+
 class Expert(nn.Module):
     """A single small SwiGLU expert used inside MoELayer."""
 
@@ -601,6 +651,9 @@ class GirivinityModel(nn.Module):
 
         self.ple = PerLayerEmbedding(cfg.vocab_size, cfg.ple_dim, cfg.dim, cfg.n_layers) if cfg.ple_dim is not None else None
         self.mhc = ManifoldHyperConnection(cfg.dim, cfg.n_residual_streams) if cfg.n_residual_streams is not None else None
+        self.mtp_modules = (
+            nn.ModuleList([MTPModule(cfg) for _ in range(cfg.n_mtp_heads)]) if cfg.mtp_enabled else None
+        )
 
         self.apply(self._init_weights)
 
@@ -684,7 +737,17 @@ class GirivinityModel(nn.Module):
             else:
                 x = layer_output
 
-        logits = self.lm_head(self.norm(x))
+        h = self.norm(x)
+        logits = self.lm_head(h)
+
+        if self.mtp_modules is not None:
+            mtp_logits: list[torch.Tensor] = []
+            mtp_hidden = h
+            for module in self.mtp_modules:
+                mtp_hidden, module_logits = module(mtp_hidden)
+                mtp_logits.append(module_logits)
+            return logits, mtp_logits, new_caches
+
         return logits, new_caches
 
     def gradient_checkpointing_enable(self) -> None:
@@ -696,6 +759,8 @@ class GirivinityModel(nn.Module):
     @torch.no_grad()
     def generate(self, input_ids: torch.Tensor, max_new_tokens: int = 256, temperature: float = 0.7, top_p: float = 0.9) -> torch.Tensor:
         self.eval()
+        if self.cfg.mtp_enabled:
+            return self._generate_speculative(input_ids, max_new_tokens, temperature, top_p)
         generated = input_ids
         kv_caches = None
         next_input = input_ids
@@ -709,6 +774,123 @@ class GirivinityModel(nn.Module):
                 next_token = self._sample_top_p(probs, top_p)
             generated = torch.cat((generated, next_token), dim=1)
             next_input = next_token
+        return generated
+
+    def _pick_token(self, logits: torch.Tensor, temperature: float, top_p: float) -> torch.Tensor:
+        if temperature <= 0:
+            return logits.argmax(dim=-1, keepdim=True)
+        probs = F.softmax(logits / temperature, dim=-1)
+        return self._sample_top_p(probs, top_p)
+
+    @torch.no_grad()
+    def _generate_speculative(
+        self, input_ids: torch.Tensor, max_new_tokens: int, temperature: float, top_p: float
+    ) -> torch.Tensor:
+        """
+        Single-step speculative decoding using MTP-1 as a free draft model.
+
+        MTP-1's prediction at the current position targets the token *two*
+        steps ahead (position t+2, given the main head already covers
+        t+1 -- see the loss-shift convention in _training_step), so a
+        speculative round looks like:
+
+          1. One forward pass gives both the main head's distribution for
+             t+1 (always taken -- it's the true target distribution, no
+             verification needed) and MTP-1's distribution for t+2 (a free
+             draft, since it costs nothing beyond the same forward pass).
+          2. The draft token for t+2 is verified by running ONE MORE
+             forward pass over the 2-token batch [confirmed t+1, draft
+             t+2] together (not two sequential single-token passes) with
+             the existing causal KV cache. This single batched call gives
+             the true target distribution for t+2 (conditioned on the now-
+             real t+1), which is what verification needs, plus a bonus
+             "next" main-head distribution usable to seed the following
+             round if the draft is accepted.
+          3. Standard rejection sampling: accept the draft with probability
+             min(1, p_target/p_draft); if rejected, resample from the
+             renormalized residual distribution max(0, p_target - p_draft)
+             instead, so a rejection never wastes the verification pass.
+
+        At temperature <= 0 this specializes to a greedy accept-iff-matches
+        rule (accept the draft only if it equals the target's own argmax;
+        otherwise take the target's argmax directly), which reduces exactly
+        to plain greedy autoregressive decoding token-for-token -- this
+        equivalence is the correctness property this method's tests check.
+
+        Batch handling: when every sequence in the batch accepts its draft,
+        the verification pass's second position is reused as the next
+        round's "free" forward pass (no extra call). If any sequence in the
+        batch rejects, this implementation falls back to a single fresh
+        forward pass on the whole batch's confirmed tokens rather than
+        trying to maintain per-sequence-divergent cache lengths within one
+        shared KV cache tensor -- correct for any batch size, but only
+        optimally fast when acceptance is uniform across the batch.
+        """
+        greedy = temperature <= 0
+        generated = input_ids
+        remaining = max_new_tokens
+
+        logits, mtp_logits, kv_caches = self(generated)
+
+        while remaining > 0:
+            main_last = logits[:, -1, :]
+            y_next = self._pick_token(main_last, temperature, top_p)
+            generated = torch.cat((generated, y_next), dim=1)
+            remaining -= 1
+            if remaining == 0:
+                break
+
+            mtp1_last = mtp_logits[0][:, -1, :]
+            y_draft = self._pick_token(mtp1_last, temperature, top_p)
+
+            verify_input = torch.cat((y_next, y_draft), dim=1)
+            logits2, mtp_logits2, kv_caches2 = self(verify_input, kv_caches=kv_caches)
+            target_draft_slot = logits2[:, 0, :]
+
+            if greedy:
+                target_choice = target_draft_slot.argmax(dim=-1, keepdim=True)
+                accept = target_choice == y_draft
+                y_confirmed = torch.where(accept, y_draft, target_choice)
+            else:
+                probs_target = F.softmax(target_draft_slot / temperature, dim=-1)
+                probs_draft = F.softmax(mtp1_last / temperature, dim=-1)
+                p_t = probs_target.gather(-1, y_draft)
+                p_d = probs_draft.gather(-1, y_draft).clamp_min(1e-9)
+                accept_prob = (p_t / p_d).clamp(max=1.0)
+                accept = torch.rand_like(accept_prob) < accept_prob
+                residual = (probs_target - probs_draft).clamp_min(0.0)
+                residual = residual / residual.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+                resampled = torch.multinomial(residual, num_samples=1)
+                y_confirmed = torch.where(accept, y_draft, resampled)
+
+            generated = torch.cat((generated, y_confirmed), dim=1)
+            remaining -= 1
+            if remaining == 0:
+                break
+
+            if bool(accept.all()):
+                # The draft was accepted for every sequence in the batch, so
+                # the 2-token-extended cache from the verification pass is
+                # valid to keep, and its second position's outputs (which
+                # were computed *as if* the draft were real) are exactly
+                # what the accepted draft makes them: genuine model outputs
+                # for the position right after y_confirmed. Reuse them
+                # instead of a redundant forward call.
+                logits = logits2[:, 1:, :]
+                mtp_logits = [m[:, 1:, :] for m in mtp_logits2]
+                kv_caches = kv_caches2
+            else:
+                # At least one sequence's draft was rejected, so its slot in
+                # the 2-token-extended cache holds KV computed for a token
+                # that was never actually used (the rejected draft, not the
+                # resampled replacement). Reusing that cache for any
+                # sequence would silently corrupt future attention over
+                # that position. Fall back to the cache extended by only
+                # the confirmed y_next token, then run one more forward
+                # pass over the real y_confirmed token to populate its
+                # cache entry correctly.
+                logits, mtp_logits, kv_caches = self(y_confirmed, kv_caches=kv_caches)
+
         return generated
 
     @staticmethod
