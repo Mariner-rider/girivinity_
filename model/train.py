@@ -101,7 +101,8 @@ def train(
 
         for step, (x, y) in enumerate(loader, 1):
             x, y = x.to(device), y.to(device)
-            logits, _ = model(x)
+            output = model(x)
+            logits = output[0]
             loss = nn.functional.cross_entropy(
                 logits.view(-1, cfg.vocab_size),
                 y.view(-1),

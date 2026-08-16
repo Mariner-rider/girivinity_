@@ -283,7 +283,8 @@ class SuccessorEngine:
 
             with torch.no_grad():
                 ids = torch.randint(0, cfg.vocab_size, (1, 64), device=device)
-                logits, _ = model(ids)
+                output = model(ids)
+                logits = output[0]
                 loss = F.cross_entropy(
                     logits[:, :-1].reshape(-1, cfg.vocab_size),
                     ids[:, 1:].reshape(-1),
